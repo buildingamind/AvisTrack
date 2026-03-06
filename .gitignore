@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+
+# Data (actual files live on external drive / NAS)
+# Only configs and manifests pointing to data are tracked in git
+data/
+
+# Eval reports output
+eval/reports/
+
+# Model weights (stored on drive)
+*.pt
+*.pth
+*.onnx
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

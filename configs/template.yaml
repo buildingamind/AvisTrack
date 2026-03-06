@@ -1,0 +1,51 @@
+# =============================================================
+#  AvisTrack Config Template
+#  Copy this file, rename it, and fill in your values.
+#  All fields marked (required) must be set.
+# =============================================================
+
+experiment: "MyExperiment_Wave_Day"   # (required) human-readable name
+
+# ── External drive / NAS paths ────────────────────────────────
+# '{root}' is automatically substituted everywhere in this file.
+drive:
+  root:           "/media/woodlab/YOUR_DRIVE/WaveX"  # (required) mount point
+
+  raw_videos:     "{root}/00_raw_videos"
+  dataset:        "{root}/01_Dataset_MOT_Format"
+  metadata:       "{root}/02_Global_Metadata"
+  roi_file:       "{root}/02_Global_Metadata/camera_rois.json"
+
+  train_manifest: "{root}/02_Global_Metadata/train_data_manifest.txt"
+  val_manifest:   "{root}/02_Global_Metadata/val_tuning_manifest.txt"
+  test_manifest:  "{root}/02_Global_Metadata/test_golden_manifest.txt"
+
+# ── Chamber / experiment parameters ───────────────────────────
+chamber:
+  n_subjects:  9          # (required) number of animals
+  fps:         30
+  target_size: [640, 640] # inference resolution for YOLO (null = preserve aspect)
+
+# ── Model backend ──────────────────────────────────────────────
+# backend options: "yolo"  |  "dlc"  |  "vit"
+# mode    options: "offline" (default)  |  "realtime"  (YOLO only)
+model:
+  backend: "yolo"
+  mode:    "offline"
+  weights: "{root}/03_Model_Training/Yolo11n/Train_v1_best/weights/best.pt"
+
+# ── Tracking parameters ────────────────────────────────────────
+tracking:
+  conf_threshold:  0.2   # YOLO detection confidence threshold
+  max_gap_frames:  30    # max frames to interpolate across a tracking gap
+
+# ── Pipeline steps ─────────────────────────────────────────────
+# Remove or comment out 'transform' if your video is already cropped.
+pipeline:
+  - step: transform      # perspective warp using ROI
+  - step: track          # run the model backend
+
+# ── Output ────────────────────────────────────────────────────
+output:
+  format: "mot"          # "mot" (txt) or "parquet"
+  dir:    "./outputs"    # local output directory

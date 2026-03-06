@@ -1,0 +1,39 @@
+# Wave 3 – VR Chamber experiment
+
+experiment: "Wave3_VR"
+
+drive:
+  root:           "/media/woodlab/104-A/Wave3"
+  raw_videos:     "{root}/00_raw_videos"
+  metadata:       "{root}/02_Global_Metadata"
+  roi_file:       "{root}/02_Global_Metadata/camera_rois.json"
+  train_manifest: "{root}/02_Global_Metadata/train_data_manifest.txt"
+  val_manifest:   "{root}/02_Global_Metadata/val_tuning_manifest.txt"
+  test_manifest:  "{root}/02_Global_Metadata/test_golden_manifest.txt"
+
+chamber:
+  n_subjects:  1       # VR paradigm: single bird
+  fps:         30
+  target_size: [640, 640]
+
+model:
+  backend: "yolo"
+  mode:    "realtime"   # used live via ChamberBroadcaster
+  weights: "{root}/03_Model_Training/Yolo11n/Train_v1_best/weights/best.pt"
+  keypoint_name: "center"
+  kalman_filter:
+    R: 5.0
+    Q: 0.001
+    P: 1000.0
+
+tracking:
+  conf_threshold: 0.3
+  max_gap_frames: 15
+
+pipeline:
+  - step: transform
+  - step: track
+
+output:
+  format: "mot"
+  dir:    "{root}/../outputs/W3_VR"

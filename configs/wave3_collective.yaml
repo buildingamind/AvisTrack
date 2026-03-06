@@ -1,0 +1,36 @@
+# Wave 3 – Collective Chamber experiment
+# Matches the existing data layout on /media/woodlab/104-A
+
+experiment: "Wave3_Collective"
+
+drive:
+  root:           "/media/woodlab/104-A/Wave3"
+  raw_videos:     "{root}/00_raw_videos"
+  dataset:        "{root}/01_Dataset_MOT_Format"
+  metadata:       "{root}/02_Global_Metadata"
+  roi_file:       "{root}/02_Global_Metadata/camera_rois.json"
+  train_manifest: "{root}/02_Global_Metadata/train_data_manifest.txt"
+  val_manifest:   "{root}/02_Global_Metadata/val_tuning_manifest.txt"
+  test_manifest:  "{root}/02_Global_Metadata/test_golden_manifest.txt"
+
+chamber:
+  n_subjects:  9
+  fps:         30
+  target_size: [640, 640]
+
+model:
+  backend: "yolo"
+  mode:    "offline"
+  weights: "{root}/03_Model_Training/Yolo11n/Train_v1_best/weights/best.pt"
+
+tracking:
+  conf_threshold: 0.2
+  max_gap_frames: 30
+
+pipeline:
+  - step: transform
+  - step: track
+
+output:
+  format: "mot"
+  dir:    "{root}/../outputs/W3_COLL"

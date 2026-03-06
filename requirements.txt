@@ -1,0 +1,22 @@
+# Core
+numpy
+opencv-python
+scipy
+pyyaml
+pydantic>=2.0
+
+# Tracking / ML
+ultralytics         # YOLO
+filterpy            # Kalman filter (used by yolo realtime backend)
+torch
+torchvision
+
+# Offline batch processing
+pandas
+polars
+
+# Optional: DLC backend
+# deeplabcut
+
+# Dev / testing
+pytest
