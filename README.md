@@ -12,13 +12,15 @@
 3. [Architecture](#3-architecture)
 4. [Project Structure](#4-project-structure)
 5. [Setup](#5-setup)
-6. [Configuration](#6-configuration)
-7. [Tools](#7-tools)
-8. [Offline Batch Processing](#8-offline-batch-processing)
-9. [Model Evaluation](#9-model-evaluation)
-10. [Real-time Integration (ChamberBroadcaster)](#10-real-time-integration-chamberbroadcaster)
-11. [Dataset & Sampling Workflow](#11-dataset--sampling-workflow)
-12. [Running Tests](#12-running-tests)
+6. [Quick Start (New Experiment)](#6-quick-start-new-experiment)
+7. [Configuration](#7-configuration)
+8. [Tools](#8-tools)
+9. [Dataset & Sampling Workflow](#9-dataset--sampling-workflow)
+10. [Offline Batch Processing](#10-offline-batch-processing)
+11. [Model Evaluation](#11-model-evaluation)
+12. [Real-time Integration (ChamberBroadcaster)](#12-real-time-integration-chamberbroadcaster)
+13. [Running Tests](#13-running-tests)
+14. [Common Recipes](#14-common-recipes)
 
 ---
 
@@ -165,8 +167,9 @@ AvisTrack/
 │   └── wave3_vr.yaml             # Wave 3 VR Chamber
 │
 ├── tools/
-│   ├── pick_rois.py              # Interactive ROI corner picker → writes camera_rois.json
-│   └── sample_clips.py          # Sample clips from raw videos, check manifest for overlaps
+│   ├── init_config.py            # ★ Interactive config wizard — creates YAML configs
+│   ├── pick_rois.py              # ROI picker + validator → camera_rois.json
+│   └── sample_clips.py           # Sample clips from raw videos with ROI transform
 │
 ├── eval/
 │   └── run_eval.py               # Compare multiple weight files on test set → CSV report
@@ -221,9 +224,152 @@ conda run -n avistrack python -m pytest tests/ -v
 
 ---
 
-## 6. Configuration
+## 6. Quick Start (New Experiment)
 
-All experiments are driven by a single YAML file. Copy `configs/template.yaml` and fill in your paths.
+This section walks through the **complete workflow** from zero to processed data. Every command below assumes `conda activate avistrack` has been run.
+
+### Step 0: Prepare your external drive
+
+Create the standard directory structure on your drive:
+
+```
+/media/woodlab/<DRIVE_NAME>/<WaveX>/
+├── 00_raw_videos/            ← put your .mkv recordings here
+├── 01_Dataset_MOT_Format/
+│   ├── train/
+│   ├── val_tuning/
+│   └── test_golden/
+├── 02_Global_Metadata/       ← manifests + ROIs will go here
+└── 03_Model_Training/        ← put trained weights here
+```
+
+You can create only the folders you need — the tools will create missing ones for you.
+
+### Step 1: Create a config file (GUI wizard)
+
+```bash
+python tools/init_config.py
+```
+
+A GUI window opens with:
+- **Browse buttons** for every path (folders and files) — no manual path typing
+- **Dropdowns** for backend, mode, and output format
+- **Spinboxes** for numeric fields (subjects, FPS, threshold)
+- **Auto-detect** button that scans the drive root for standard directories and weight files
+- **Save dialog** to pick where the YAML goes
+- Path validation with warnings shown before saving
+
+You can pre-fill the root:
+
+```bash
+python tools/init_config.py --root /media/woodlab/104-A/Wave2 --name Wave2_Collective
+```
+
+If tkinter is not available (e.g. headless server), fall back to terminal mode:
+
+```bash
+python tools/init_config.py --cli
+```
+
+> **Alternatively**, copy and edit the template manually:
+> ```bash
+> cp configs/template.yaml configs/wave2_collective.yaml
+> # Edit with your favorite editor
+> ```
+
+### Step 2: Pick ROI corners (if using perspective transform)
+
+```bash
+python tools/pick_rois.py --config configs/wave2_collective.yaml
+```
+
+The config provides `raw_videos` and `roi_file` automatically.  
+Click the 4 chamber corners in each video frame. Results are saved after every video (crash-safe).
+
+Then validate that every video is covered:
+
+```bash
+python tools/pick_rois.py validate --config configs/wave2_collective.yaml
+```
+
+### Step 3: Sample training / val / test clips
+
+```bash
+# Training clips: 20 clips × 3 seconds each
+python tools/sample_clips.py \
+    --config     configs/wave2_collective.yaml \
+    --split      train \
+    --n          20 \
+    --duration   3 \
+    --output-dir /media/woodlab/104-A/Wave2/01_Dataset_MOT_Format/train
+
+# Validation clips
+python tools/sample_clips.py \
+    --config     configs/wave2_collective.yaml \
+    --split      val \
+    --n          10 \
+    --duration   3 \
+    --output-dir /media/woodlab/104-A/Wave2/01_Dataset_MOT_Format/val_tuning
+
+# Golden test clips: 20 clips × 20 seconds (600 frames @ 30fps)
+python tools/sample_clips.py \
+    --config     configs/wave2_collective.yaml \
+    --split      test \
+    --n          20 \
+    --duration   20 \
+    --output-dir /media/woodlab/104-A/Wave2/01_Dataset_MOT_Format/test_golden
+```
+
+> **Important:** `--duration` is in **seconds**, not frames.
+> To get a specific number of frames, divide by FPS:
+>
+> | Desired frames | FPS | `--duration` |
+> |---------------|-----|-------------|
+> | 90 frames     | 30  | `3`         |
+> | 300 frames    | 30  | `10`        |
+> | 600 frames    | 30  | `20`        |
+> | 900 frames    | 30  | `30`        |
+
+### Step 4: Train your model (outside AvisTrack)
+
+Label the sampled clips in CVAT / Roboflow / Label Studio, then train YOLO:
+
+```bash
+yolo detect train data=dataset.yaml model=yolo11n.pt epochs=100 imgsz=640
+```
+
+Put the resulting `best.pt` into `03_Model_Training/` on the drive and update the `model.weights` path in your config.
+
+### Step 5: Evaluate model performance
+
+```bash
+python eval/run_eval.py \
+    --config  configs/wave2_collective.yaml \
+    --weights /media/.../weights/best.pt \
+    --output  eval/reports/wave2_coll.csv
+```
+
+### Step 6: Run batch processing on all raw videos
+
+```bash
+python cli/run_batch.py --config configs/wave2_collective.yaml
+```
+
+Done! MOT output files will appear in the `output.dir` specified in your config.
+
+---
+
+## 7. Configuration
+
+All experiments are driven by a single YAML file. You can create one in three ways:
+
+| Method | When to use |
+|--------|-------------|
+| `python tools/init_config.py` | **Recommended.** Interactive wizard with validation and auto-detection. |
+| Copy `configs/template.yaml` | When you want full manual control. |
+| Copy an existing wave config | When the new experiment is similar to one you've already set up. |
+
+### 7.1 Example config
 
 ```yaml
 experiment: "Wave3_Collective"
@@ -240,11 +386,11 @@ drive:
 chamber:
   n_subjects:  9
   fps:         30
-  target_size: [640, 640]   # inference resolution; null = preserve aspect ratio
+  target_size: [640, 640]
 
 model:
-  backend: "yolo"           # "yolo" | "dlc" | "vit"
-  mode:    "offline"        # "offline" | "realtime"  (YOLO only)
+  backend: "yolo"
+  mode:    "offline"
   weights: "{root}/03_Model_Training/Yolo11n/Train_v1_best/weights/best.pt"
 
 tracking:
@@ -252,57 +398,206 @@ tracking:
   max_gap_frames: 30
 
 pipeline:
-  - step: transform         # remove this line if video is already cropped
+  - step: transform
   - step: track
 
 output:
-  format: "mot"             # "mot" (txt) or "parquet"
+  format: "mot"
   dir:    "{root}/../outputs/W3_COLL"
 ```
 
-### Configuration key reference
+### 7.2 Key reference
 
-| Key | Description |
-|-----|-------------|
-| `drive.root` | Mount point of the external drive / NAS |
-| `chamber.n_subjects` | Number of animals; caps the number of tracked IDs |
-| `chamber.target_size` | `[w, h]` for perspective-corrected output; `null` = auto |
-| `model.backend` | Which tracker to load |
-| `model.mode` | `offline` = batch processing; `realtime` = live CB feed |
-| `tracking.max_gap_frames` | Frames to interpolate across a detection gap |
-| `pipeline` | List of steps; remove `transform` if no ROI warp needed |
+| Key | Type | Description |
+|-----|------|-------------|
+| `experiment` | string | Human-readable name for this experiment |
+| `drive.root` | string | Mount point of the external drive / NAS |
+| `drive.raw_videos` | string | Directory containing source `.mkv` / `.mp4` recordings |
+| `drive.roi_file` | string | Path to `camera_rois.json` (4-corner ROI per video) |
+| `drive.train_manifest` | string | CSV tracking which clips have been sampled for training |
+| `drive.val_manifest` | string | CSV tracking which clips have been sampled for validation |
+| `drive.test_manifest` | string | CSV tracking which clips have been sampled for testing |
+| `chamber.n_subjects` | int | Number of animals; caps tracked IDs |
+| `chamber.fps` | int | Video framerate |
+| `chamber.target_size` | [w, h] | Inference resolution after perspective warp; `null` = auto |
+| `model.backend` | string | `"yolo"` \| `"dlc"` \| `"vit"` |
+| `model.mode` | string | `"offline"` = batch; `"realtime"` = live CB feed |
+| `model.weights` | string | Path to the trained weight file |
+| `tracking.conf_threshold` | float | Detection confidence threshold (0–1) |
+| `tracking.max_gap_frames` | int | Max frames to interpolate across a detection gap |
+| `pipeline` | list | Steps to run: `transform` (optional) and `track` |
+| `output.format` | string | `"mot"` (txt) or `"parquet"` |
+| `output.dir` | string | Where to write tracking output files |
+
+### 7.3 How `{root}` resolution works
+
+Any string value in the YAML containing `{root}` is replaced with the value of `drive.root` at load time. This keeps configs DRY — change the drive mount point in one place and all paths update automatically.
+
+```yaml
+drive:
+  root: "/media/woodlab/104-A/Wave3"
+  raw_videos: "{root}/00_raw_videos"
+  # → resolved to: /media/woodlab/104-A/Wave3/00_raw_videos
+```
 
 ---
 
-## 7. Tools
+## 8. Tools
 
-### 7.1 Pick ROI corners — `tools/pick_rois.py`
+### 8.1 Config wizard — `tools/init_config.py`
 
-Scans a folder for videos, shows the first frame of each one that has no ROI entry yet, and lets you click the 4 chamber corners interactively. Results are appended to `camera_rois.json` on the drive after each video (crash-safe).
+GUI-based config creator with folder/file pickers, validation, and auto-detection. See [Quick Start](#6-quick-start-new-experiment) for details.
 
 ```bash
-conda activate avistrack
-python tools/pick_rois.py \
-    --video-dir /media/woodlab/104-A/Wave3/00_raw_videos \
-    --roi-file  /media/woodlab/104-A/Wave3/02_Global_Metadata/camera_rois.json
+# Launch GUI wizard (default)
+python tools/init_config.py
+
+# Pre-fill drive root and experiment name
+python tools/init_config.py --root /media/woodlab/104-A/Wave2 --name Wave2_Collective
+
+# Terminal-only mode (no GUI)
+python tools/init_config.py --cli
+
+# Specify output path (CLI mode)
+python tools/init_config.py --cli -o configs/my_experiment.yaml
 ```
 
-**Controls in the window:**
+**What the GUI provides:**
+- **Browse…** buttons for every path field — pick folders and files from the OS file dialog
+- **Auto-detect** button scans drive root for `00_raw_videos/`, `02_Global_Metadata/`, etc.
+- **Dropdown** for backend (`yolo` / `dlc` / `vit`), mode, and output format
+- **Spinboxes** for numeric values (no typos possible)
+- Auto-finds `.pt` weight files under `03_Model_Training/` and lists them in a dropdown
+- Validates all paths and shows warnings before saving
+- **Save As** dialog for the output YAML file
+- Falls back to CLI mode automatically if `tkinter` is not installed
+
+---
+
+### 8.2 ROI tool — `tools/pick_rois.py`
+
+Two modes: **pick** (interactive corner picker, **default**) and **validate** (check format + coverage).
+
+#### `pick` — Interactive 4-corner ROI picker (default)
+
+Scans a folder for videos and opens a single OpenCV window with a **left info panel** and the **video frame** on the right. A random frame is shown by default. Corners from the previous video carry forward as defaults. You can navigate back and forth between videos with arrow keys.
+
+```bash
+# Default mode is pick — no subcommand needed:
+python tools/pick_rois.py --config configs/wave3_collective.yaml
+
+# Explicit subcommand also works:
+python tools/pick_rois.py pick --config configs/wave3_collective.yaml
+
+# IR only:
+python tools/pick_rois.py --config configs/wave3_collective.yaml --modality ir
+
+# All modalities (RGB first, then IR):
+python tools/pick_rois.py --config configs/wave3_collective.yaml --modality all
+```
+
+| Flag | Description |
+|------|-------------|
+| `--config` | YAML config to auto-resolve `raw_videos` and `roi_file` |
+| `--video-dir` | Override video directory (or use without config) |
+| `--roi-file` | Override ROI output path (or use without config) |
+| `--modality` | `rgb` (default), `ir`, or `all` (RGB first then IR) |
+
+**Controls** (shown in the left info panel):
 
 | Key | Action |
 |-----|--------|
-| Left-click | Place a corner (order: TL → TR → BR → BL) |
-| `R` | Reset all corners for this video |
-| `S` / Enter | Save and move to next video |
-| `Q` / Esc | Skip this video |
+| Left-click | Place next corner (order: ① upper-left → ② upper-right → ③ lower-right → ④ lower-left) |
+| `Z` / Ctrl+Z | Undo last corner |
+| `R` | Reset all 4 corners |
+| `N` | Jump to a random frame |
+| ← / `A` | Go to **previous video** |
+| → / `D` | Save corners & go to **next video** |
+| `S` / Enter | Save corners & next video |
+| `Q` / Esc | Quit the picker entirely |
 
-Add `--force` to re-pick ROIs for videos that already have an entry.
+**UI layout:**
+- Single window: dark left panel (info + controls + corner status) + video frame on right
+- Lines are drawn **progressively** as you place corners (2 corners = 1 line, 3 = 2 lines, 4 = closed polygon)
+- Corner dots are color-coded with numbered labels (①②③④)
+
+**Behavior notes:**
+- All videos are shown, including ones that already have a saved ROI (marked 🟡 for review, 🟢 for new)
+- Each video starts with the previous video's corners pre-loaded (press `R` to clear)
+- If a video already has a saved ROI, those saved corners are loaded instead
+- Use ← / → to navigate between videos — you can go back to review/edit previous ones
+- Results are saved to JSON after every forward move (crash-safe)
+
+#### `validate` — Check ROI file before sampling
+
+Run this before `sample_clips.py` to catch problems early.  Checks:
+1. File exists
+2. Valid JSON
+3. Every entry has exactly 4 `[x, y]` corner points (numbers)
+4. Every target video (filtered by `--modality`) has an ROI entry
+
+```bash
+# Using a config (auto-resolves roi_file + raw_videos paths):
+python tools/pick_rois.py validate --config configs/wave3_collective.yaml
+
+# Or specify paths directly:
+python tools/pick_rois.py validate \
+    --roi-file  /media/woodlab/104-A/Wave3/02_Global_Metadata/camera_rois.json \
+    --video-dir /media/woodlab/104-A/Wave3/00_raw_videos \
+    --modality  rgb
+```
+
+Example output (all good):
+```
+📂 Checking ROI for 17 RGB video(s) in .../00_raw_videos
+📄 ROI file: .../camera_rois.json
+
+  ✅ ROI file has 18 entries
+  ✅ All 18 entries have valid 4-corner format
+  ✅ All 17 videos have ROI entries
+
+✅ ROI validation passed.
+```
+
+Example output (problems):
+```
+  ✅ ROI file has 15 entries
+  ✅ All 15 entries have valid 4-corner format
+  ❌ 2/17 videos have NO ROI entry:
+     Wave3_CollectiveDanger_3_Day15_Camera1_RGB.mkv
+     Wave3_CollectiveDanger_3_Day16_Camera1_RGB.mkv
+
+❌ ROI validation FAILED.
+```
+
+#### ROI file format (`camera_rois.json`)
+
+```json
+{
+    "Wave3_CollectiveChamber_Day1_Cam1_RGB.mkv": [
+        [315, 61],   // TL
+        [889, 63],   // TR
+        [870, 629],  // BR
+        [327, 622]   // BL
+    ],
+    "Wave3_CollectiveDanger_2_Day2_Camera1_RGB.mkv": [
+        [314, 104],
+        [887, 103],
+        [870, 664],
+        [328, 657]
+    ]
+}
+```
+
+Keys are video **basenames** (with extension). Each value is a list of exactly 4 `[x, y]` integer pairs representing chamber corners.
 
 ---
 
-### 7.2 Sample clips — `tools/sample_clips.py`
+### 8.3 Sample clips — `tools/sample_clips.py`
 
-Randomly samples short clips from raw videos and saves them to the drive. Reads all three existing manifests (train / val / test) first, so new clips are guaranteed not to overlap with anything already sampled.
+Randomly samples short clips from raw **RGB** videos (default), applies ROI perspective-correction on each frame, and appends records to the manifest.  Uses frame-count-weighted sampling so longer videos get proportionally more clips.
+
+Before sampling, the tool runs `validate_roi_file()` to ensure the ROI file exists, is well-formed, and covers every target video. If validation fails, it prints the exact `pick_rois.py` command to fix it.
 
 ```bash
 python tools/sample_clips.py \
@@ -313,7 +608,30 @@ python tools/sample_clips.py \
     --output-dir /media/woodlab/104-A/Wave3/01_Dataset_MOT_Format/train
 ```
 
-Each new clip is appended to the corresponding manifest file immediately (crash-safe). The manifest format matches what already exists on the drive:
+**All flags:**
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--config` | Yes | — | Path to YAML config file |
+| `--split` | Yes | — | `train` \| `val` \| `test` — determines which manifest to append to |
+| `--n` | Yes | — | Number of clips to sample |
+| `--duration` | No | `3` | Clip length in **seconds** |
+| `--output-dir` | Yes | — | Where to write the `.mp4` clip files |
+| `--seed` | No | `42` | Random seed for reproducibility |
+| `--modality` | No | `rgb` | `rgb` or `ir` — filter videos by filename keyword |
+| `--min-gap` | No | `5` | Minimum gap in **minutes** between clips from the same video |
+| `--no-transform` | No | — | Skip ROI crop / perspective-correction (extract raw clips) |
+
+**Duration is in seconds — conversion table:**
+
+| Frames | @ 30 fps | `--duration` |
+|--------|----------|-------------|
+| 90     | 3s       | `3`         |
+| 300    | 10s      | `10`        |
+| 600    | 20s      | `20`        |
+| 900    | 30s      | `30`        |
+
+Each new clip is appended to the corresponding manifest file immediately (crash-safe). The manifest CSV format:
 
 ```
 Clip_Filename, Original_Video_Path, Start_Time, Duration
@@ -322,7 +640,79 @@ Wave3_..._TRAIN_s49508.mp4, /media/.../Day12_RGB.mkv, 49508.33, 3
 
 ---
 
-## 8. Offline Batch Processing
+## 9. Dataset & Sampling Workflow
+
+Data on the external drive follows this layout (established in Wave 3):
+
+```
+/media/woodlab/104-A/Wave3/
+├── 00_raw_videos/                 continuous .mkv recordings
+├── 01_Dataset_MOT_Format/
+│   ├── train/                     sampled .mp4 clips (training set)
+│   ├── val_tuning/                sampled .mp4 clips (validation set)
+│   └── test_golden/               sampled .mp4 clips + .txt ground truth
+├── 02_Global_Metadata/
+│   ├── camera_rois.json           {video_name: [[x,y],[x,y],[x,y],[x,y]]}
+│   ├── train_data_manifest.txt    Clip_Filename, Original_Video_Path, Start_Time, Duration
+│   ├── val_tuning_manifest.txt
+│   ├── test_golden_manifest.txt
+│   ├── valid_intervals.json
+│   └── danger_intervals.json
+└── 03_Model_Training/
+    └── Yolo11n/
+        └── Train_v1_best/weights/best.pt
+```
+
+**The manifests are the source of truth for what has been sampled.** `sample_clips.py` reads all three before picking any new clips, ensuring zero time-overlap across the entire dataset.
+
+### Typical iteration cycle
+
+```
+┌─────────────────────────────────┐
+│  1. Create config               │  python tools/init_config.py
+│     (or copy template.yaml)     │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  2. Pick ROIs                   │  python tools/pick_rois.py --config ...
+│     + Validate coverage         │  python tools/pick_rois.py validate --config ...
+│     (skip if no transform)      │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  3. Sample train clips          │  python tools/sample_clips.py --split train ...
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  4. Label clips in CVAT         │  (external tool)
+│     + Train YOLO                │  yolo detect train ...
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  5. Sample golden test clips    │  python tools/sample_clips.py --split test ...
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  6. Label test clips GT         │  (manual annotation in MOT format)
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  7. Evaluate model              │  python eval/run_eval.py ...
+│     Not good enough? → go to 3  │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  8. Batch process all videos    │  python cli/run_batch.py --config ...
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  9. Analyze with CCM            │  (Collective-Chamber-Metrics repo)
+└─────────────────────────────────┘
+```
+
+---
+
+## 10. Offline Batch Processing
 
 Processes **all** raw videos with a single command. Supports:
 - Automatic resume (skips files whose output already exists)
@@ -330,7 +720,6 @@ Processes **all** raw videos with a single command. Supports:
 - Per-video progress logging
 
 ```bash
-conda activate avistrack
 python cli/run_batch.py --config configs/wave3_collective.yaml
 ```
 
@@ -346,7 +735,7 @@ Output is written to the `output.dir` path set in the config. Each video produce
 
 ---
 
-## 9. Model Evaluation
+## 11. Model Evaluation
 
 Compare multiple trained weight files on the same test set. For each clip in `01_Dataset_MOT_Format/test_golden/`, a matching `.txt` ground-truth file must exist in the same folder (MOT format).
 
@@ -366,27 +755,9 @@ python eval/run_eval.py \
 | v1_best.pt | 0.912 | 0.883 | 0.897 | 14 | 43.2 |
 | v2_best.pt | 0.941 | 0.921 | 0.931 | 7  | 41.8 |
 
-### Typical iteration cycle
-
-```
-Run eval → performance not satisfactory?
-    │
-    ▼
-sample_clips.py --split train --n 20   (new clips, no overlap with existing)
-    │
-    ▼
-Retrain YOLO with expanded dataset
-    │
-    ▼
-Run eval again → compare v1 vs v2 vs v3 in one command
-    │
-    ▼
-Pick best weights → run_batch.py on full dataset
-```
-
 ---
 
-## 10. Real-time Integration (ChamberBroadcaster)
+## 12. Real-time Integration (ChamberBroadcaster)
 
 AvisTrack is installed as a package in ChamberBroadcaster's environment:
 
@@ -445,34 +816,7 @@ The existing `YoloKalmanProcessor`, `JoshuTrackingProcessor`, and `DLCTrackingPr
 
 ---
 
-## 11. Dataset & Sampling Workflow
-
-Data on the external drive follows this layout (established in Wave 3):
-
-```
-/media/woodlab/104-A/Wave3/
-├── 00_raw_videos/                 continuous .mkv recordings
-├── 01_Dataset_MOT_Format/
-│   ├── train/                     sampled .mp4 clips (training set)
-│   ├── val_tuning/                sampled .mp4 clips (validation set)
-│   └── test_golden/               sampled .mp4 clips + .txt ground truth
-├── 02_Global_Metadata/
-│   ├── camera_rois.json           {video_name: [[x,y],[x,y],[x,y],[x,y]]}
-│   ├── train_data_manifest.txt    Clip_Filename, Original_Video_Path, Start_Time, Duration
-│   ├── val_tuning_manifest.txt
-│   ├── test_golden_manifest.txt
-│   ├── valid_intervals.json
-│   └── danger_intervals.json
-└── 03_Model_Training/
-    └── Yolo11n/
-        └── Train_v1_best/weights/best.pt
-```
-
-**The manifests are the source of truth for what has been sampled.** `sample_clips.py` reads all three before picking any new clips, ensuring zero time-overlap across the entire dataset.
-
----
-
-## 12. Running Tests
+## 13. Running Tests
 
 ```bash
 conda activate avistrack
@@ -489,4 +833,77 @@ tests/test_transformer.py::test_from_roi_file               PASSED
 tests/test_transformer.py::test_from_roi_file_missing_key   PASSED
 
 6 passed in 0.20s
+```
+
+---
+
+## 14. Common Recipes
+
+### Sample 20 golden-test clips with 600 frames each
+
+At 30 fps, 600 frames = 20 seconds:
+
+```bash
+python tools/sample_clips.py \
+    --config     configs/wave2_collective.yaml \
+    --split      test \
+    --n          20 \
+    --duration   20 \
+    --output-dir /media/woodlab/104-A/Wave2/01_Dataset_MOT_Format/test_golden
+```
+
+### Set up a brand-new wave from scratch
+
+```bash
+# 1. Create config interactively
+python tools/init_config.py --root /media/woodlab/NEW_DRIVE/Wave4
+
+# 2. Pick ROI corners for all videos
+python tools/pick_rois.py --config configs/wave4_collective.yaml
+
+# 2b. Validate ROIs
+python tools/pick_rois.py validate --config configs/wave4_collective.yaml
+
+# 3. Sample training clips
+python tools/sample_clips.py \
+    --config configs/wave4_collective.yaml --split train --n 30 --duration 3 \
+    --output-dir /media/woodlab/NEW_DRIVE/Wave4/01_Dataset_MOT_Format/train
+
+# 4. (Label in CVAT → Train YOLO → put best.pt on drive)
+
+# 5. Sample test clips (600 frames = 20 sec @ 30fps)
+python tools/sample_clips.py \
+    --config configs/wave4_collective.yaml --split test --n 20 --duration 20 \
+    --output-dir /media/woodlab/NEW_DRIVE/Wave4/01_Dataset_MOT_Format/test_golden
+
+# 6. Evaluate
+python eval/run_eval.py --config configs/wave4_collective.yaml \
+    --weights /media/.../best.pt --output eval/reports/wave4.csv
+
+# 7. Batch process everything
+python cli/run_batch.py --config configs/wave4_collective.yaml
+```
+
+### Compare two model versions
+
+```bash
+python eval/run_eval.py \
+    --config  configs/wave3_collective.yaml \
+    --weights \
+        /media/.../Train_v1_best/weights/best.pt \
+        /media/.../Train_v2_best/weights/best.pt \
+    --output  eval/reports/comparison.csv
+```
+
+### Re-sample more training data after eval shows low recall
+
+```bash
+# This will NOT overlap with any existing train/val/test clips
+python tools/sample_clips.py \
+    --config     configs/wave3_collective.yaml \
+    --split      train \
+    --n          20 \
+    --duration   3 \
+    --seed       123 \
+    --output-dir /media/woodlab/104-A/Wave3/01_Dataset_MOT_Format/train
 ```

@@ -14,7 +14,7 @@ from pydantic import BaseModel, field_validator
 
 class ModelConfig(BaseModel):
     backend: str                        # "yolo" | "dlc" | "vit"
-    weights: Any                        # str for YOLO/DLC, dict for ViT
+    weights: Optional[Any] = None       # str for YOLO/DLC, dict for ViT
     mode: str = "offline"               # "offline" | "realtime"  (YOLO only)
 
     model_config = {"extra": "allow"}   # allow backend-specific extra fields
@@ -47,6 +47,7 @@ class DriveConfig(BaseModel):
     dataset:         Optional[str] = None
     metadata:        Optional[str] = None
     roi_file:        Optional[str] = None
+    exclusions:      Optional[str] = None     # path to exclusions.json
     train_manifest:  Optional[str] = None
     val_manifest:    Optional[str] = None
     test_manifest:   Optional[str] = None

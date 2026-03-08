@@ -15,6 +15,7 @@ drive:
   dataset:        "{root}/01_Dataset_MOT_Format"
   metadata:       "{root}/02_Global_Metadata"
   roi_file:       "{root}/02_Global_Metadata/camera_rois.json"
+  exclusions:     "{root}/02_Global_Metadata/exclusions.json"
 
   train_manifest: "{root}/02_Global_Metadata/train_data_manifest.txt"
   val_manifest:   "{root}/02_Global_Metadata/val_tuning_manifest.txt"

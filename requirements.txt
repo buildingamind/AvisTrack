@@ -4,6 +4,7 @@ opencv-python
 scipy
 pyyaml
 pydantic>=2.0
+Pillow              # PIL — used by ROI picker for panel rendering
 
 # Tracking / ML
 ultralytics         # YOLO

@@ -2,41 +2,59 @@
 """
 tools/sample_clips.py
 ──────────────────────
-Sample short clips from raw videos and append records to the wave's manifest
-file.  The tool checks all three existing manifests (train / val / test) to
-avoid time-overlap with previously sampled clips.
+Sample short clips from raw RGB videos, apply ROI perspective-correction,
+and append records to the wave's manifest file.
+
+Features
+--------
+* Only RGB videos by default (``--modality ir`` to switch)
+* Weight-based sampling: longer videos get proportionally more clips
+* ``--min-gap`` minimum minutes between any two clips in the same video
+* Each clip is immediately cropped + perspective-corrected using the ROI
+  JSON (``drive.roi_file``); aborts early if the ROI file is missing
+* Fixed seed (``--seed``) for full reproducibility
 
 Usage
 -----
+    # Minimal — everything derived from config:
+    python tools/sample_clips.py --config configs/wave2_collective.yaml
+
+    # Override defaults:
     python tools/sample_clips.py \\
-        --config  configs/wave3_collective.yaml \\
-        --split   train \\
+        --config  configs/wave2_collective.yaml \\
+        --split   test \\
         --n       20 \\
-        --duration 3 \\
-        --output-dir /media/woodlab/104-A/Wave3/01_Dataset_MOT_Format/train
+        --duration 20
 
 Options
 -------
-    --config     AvisTrack YAML config  (for drive paths)
-    --split      Which split to add to: train | val | test
-    --n          Number of new clips to sample
-    --duration   Clip duration in seconds (default 3)
-    --output-dir Where to write the .mp4 clip files
-    --seed       Random seed for reproducibility
+    --config        AvisTrack YAML config  (ONLY required arg)
+    --split         Which split to add to: train | val | test (default: train)
+    --n             Number of new clips (default: 20)
+    --duration      Clip duration in seconds (default 3)
+    --output-dir    Where to write .mp4 files (default: {dataset}/{split_dir})
+    --seed          Random seed for reproducibility (default 42)
+    --modality      rgb (default) or ir — filters by filename keyword
+    --min-gap       Minimum gap in minutes between clips from same video (default 5)
+    --no-transform  Skip ROI crop / perspective-correction (extract raw clips)
 """
 
 import argparse
 import csv
-import os
+import json
 import random
 import sys
 from pathlib import Path
+from typing import Optional
 
 import cv2
+import numpy as np
 
 # Allow running without installing the package
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from avistrack.config.loader import load_config
+from avistrack.core.transformer import PerspectiveTransformer
+from tools.pick_rois import validate_roi_file
 
 
 SPLIT_TO_MANIFEST = {
@@ -44,6 +62,62 @@ SPLIT_TO_MANIFEST = {
     "val":   "val_manifest",
     "test":  "test_manifest",
 }
+
+SPLIT_TO_DIR = {
+    "train": "train",
+    "val":   "val_tuning",
+    "test":  "test_golden",
+}
+
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov"}
+
+
+# ── Video discovery ───────────────────────────────────────────────────────
+
+def find_videos(raw_dir: str, modality: str = "rgb") -> list[Path]:
+    """
+    Recursively find video files, filtered by modality keyword in filename.
+
+    Parameters
+    ----------
+    raw_dir  : root directory to search
+    modality : "rgb" or "ir" — matched case-insensitively in the filename
+    """
+    keyword = modality.upper()  # "RGB" or "IR"
+    found = []
+    for p in Path(raw_dir).rglob("*"):
+        if p.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        if keyword not in p.stem.upper():
+            continue
+        found.append(p)
+    return sorted(found)
+
+
+# ── Video metadata (cached) ──────────────────────────────────────────────
+
+def probe_videos(videos: list[Path]) -> dict[Path, dict]:
+    """
+    Return {path: {"fps": float, "n_frames": int, "total_sec": float}}
+    for all openable videos.
+    """
+    info = {}
+    for v in videos:
+        cap = cv2.VideoCapture(str(v))
+        if not cap.isOpened():
+            cap.release()
+            continue
+        fps      = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        if n_frames < 1:
+            continue
+        info[v] = {
+            "fps":       fps,
+            "n_frames":  n_frames,
+            "total_sec": n_frames / fps,
+        }
+    return info
 
 
 # ── Manifest helpers ──────────────────────────────────────────────────────
@@ -56,51 +130,56 @@ def load_manifest(path: str | None) -> list[dict]:
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            rows.append(row)
+            # strip whitespace from keys (existing manifests have " Original_Video_Path")
+            cleaned = {k.strip(): v.strip() for k, v in row.items()}
+            rows.append(cleaned)
     return rows
 
 
 def load_all_sampled_intervals(cfg) -> list[tuple[str, float, float]]:
     """
     Load all already-sampled intervals from all three manifests.
-    Returns a list of (original_video_path, start_sec, end_sec).
+    Returns a list of (video_basename, start_sec, end_sec).
     """
     intervals = []
     for key in SPLIT_TO_MANIFEST.values():
-        path = getattr(cfg.drive, key.replace("_manifest", "") + "_manifest", None)
-        # schema stores them as train_manifest, val_manifest, test_manifest
         path = getattr(cfg.drive, key, None)
         for row in load_manifest(path):
-            src  = row.get("Original_Video_Path", "")
+            src = row.get("Original_Video_Path", "")
             try:
                 start    = float(row.get("Start_Time", 0))
                 duration = float(row.get("Duration", 3))
-                intervals.append((src, start, start + duration))
+                intervals.append((Path(src).name, start, start + duration))
             except ValueError:
                 pass
     return intervals
 
 
-def overlaps(new_start: float, new_end: float,
-             existing: list[tuple[str, float, float]],
-             video_path: str) -> bool:
-    """Return True if [new_start, new_end) overlaps any existing interval for this video."""
+def too_close(new_start: float, new_end: float,
+              existing: list[tuple[str, float, float]],
+              video_name: str,
+              min_gap_sec: float) -> bool:
+    """
+    Return True if [new_start, new_end) overlaps or is within min_gap_sec
+    of any existing interval for the same video.
+    """
     for src, s, e in existing:
-        if Path(src).name != Path(video_path).name:
+        if src != video_name:
             continue
-        # Check overlap
-        if new_start < e and new_end > s:
+        # Expand existing interval by min_gap on each side
+        if new_start < (e + min_gap_sec) and new_end > (s - min_gap_sec):
             return True
     return False
 
 
 def append_to_manifest(manifest_path: str, rows: list[dict]) -> None:
     path   = Path(manifest_path)
-    exists = path.exists()
+    exists = path.exists() and path.stat().st_size > 0
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["Clip_Filename", "Original_Video_Path", "Start_Time", "Duration"]
+            f, fieldnames=["Clip_Filename", "Original_Video_Path",
+                           "Start_Time", "Duration"]
         )
         if not exists:
             writer.writeheader()
@@ -108,31 +187,62 @@ def append_to_manifest(manifest_path: str, rows: list[dict]) -> None:
     print(f"✅ Appended {len(rows)} rows → {manifest_path}")
 
 
-# ── Clip extraction ───────────────────────────────────────────────────────
+# ── ROI helpers ───────────────────────────────────────────────────────────
+
+def load_roi_json(roi_path: str) -> dict:
+    """Load camera_rois.json → {video_basename: [[x,y], ...]}."""
+    with open(roi_path) as f:
+        return json.load(f)
+
+
+def find_roi_for_video(rois: dict, video_name: str) -> Optional[list]:
+    """
+    Look up ROI corners for a video.  Tries exact name first, then falls
+    back to stem-only match.
+    """
+    if video_name in rois:
+        return rois[video_name]
+    stem = Path(video_name).stem
+    for key, corners in rois.items():
+        if Path(key).stem == stem:
+            return corners
+    return None
+
+
+# ── Clip extraction with transform ───────────────────────────────────────
 
 def extract_clip(
     video_path: str,
     start_sec: float,
     duration: float,
     output_path: str,
+    transformer: Optional[PerspectiveTransformer] = None,
 ) -> bool:
-    """Extract [start_sec, start_sec+duration] from video_path → output_path."""
+    """
+    Extract [start_sec, start_sec+duration] from video_path → output_path.
+    If a transformer is provided, each frame is perspective-corrected before
+    writing.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"  ❌ Cannot open: {video_path}")
         return False
 
-    fps        = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps         = cap.get(cv2.CAP_PROP_FPS) or 30.0
     start_frame = int(start_sec * fps)
     n_frames    = int(duration  * fps)
 
-    w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if transformer is not None:
+        out_w, out_h = transformer.output_size
+    else:
+        out_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        out_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
     out = cv2.VideoWriter(
         output_path,
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
-        (w, h),
+        (out_w, out_h),
     )
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -141,6 +251,8 @@ def extract_clip(
         ret, frame = cap.read()
         if not ret:
             break
+        if transformer is not None:
+            frame = transformer.transform(frame)
         out.write(frame)
         written += 1
 
@@ -152,98 +264,178 @@ def extract_clip(
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Sample clips from raw videos.")
-    parser.add_argument("--config",     required=True)
-    parser.add_argument("--split",      required=True, choices=["train", "val", "test"])
-    parser.add_argument("--n",          type=int, required=True, help="Number of new clips")
-    parser.add_argument("--duration",   type=float, default=3.0, help="Clip duration in seconds")
-    parser.add_argument("--output-dir", required=True, help="Where to write .mp4 files")
-    parser.add_argument("--seed",       type=int, default=42)
+    parser = argparse.ArgumentParser(
+        description="Sample clips from raw videos with ROI perspective-correction.")
+    parser.add_argument("--config",     required=True,
+                        help="AvisTrack YAML config (only required argument)")
+    parser.add_argument("--split",      default="train", choices=["train", "val", "test"],
+                        help="Which split (default: train)")
+    parser.add_argument("--n",          type=int, default=20,
+                        help="Number of new clips (default: 20)")
+    parser.add_argument("--duration",   type=float, default=3.0,
+                        help="Clip duration in seconds (default: 3)")
+    parser.add_argument("--output-dir", default=None,
+                        help="Where to write .mp4 files "
+                             "(default: {dataset}/{split_dir} from config)")
+    parser.add_argument("--seed",       type=int, default=42,
+                        help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--modality",   default="rgb", choices=["rgb", "ir"],
+                        help="Filter videos by modality keyword (default: rgb)")
+    parser.add_argument("--min-gap",    type=float, default=5.0,
+                        help="Minimum gap in MINUTES between clips from the "
+                             "same video (default: 5)")
+    parser.add_argument("--no-transform", action="store_true",
+                        help="Skip ROI crop / perspective-correction")
     args = parser.parse_args()
 
     random.seed(args.seed)
     cfg = load_config(args.config)
 
+    # ── Derive output-dir from config if not given ────────────────────
+    if args.output_dir is None:
+        dataset_dir = cfg.drive.dataset
+        if not dataset_dir:
+            print("❌ --output-dir not given and drive.dataset is empty in config")
+            sys.exit(1)
+        args.output_dir = str(Path(dataset_dir) / SPLIT_TO_DIR[args.split])
+        print(f"📁 Output dir (auto): {args.output_dir}")
+
+    min_gap_sec = args.min_gap * 60.0   # convert minutes → seconds
+
+    # ── 1. Find source videos ─────────────────────────────────────────
     raw_dir = cfg.drive.raw_videos
     if not raw_dir or not Path(raw_dir).exists():
         print(f"❌ raw_videos path not found: {raw_dir}")
         sys.exit(1)
 
+    all_videos = find_videos(raw_dir, modality=args.modality)
+    if not all_videos:
+        print(f"❌ No {args.modality.upper()} videos found in {raw_dir}")
+        sys.exit(1)
+    print(f"📹 Found {len(all_videos)} {args.modality.upper()} video(s) in {raw_dir}")
+
+    # ── 2. ROI validation (required unless --no-transform) ────────────
+    roi_path = cfg.drive.roi_file
+    rois: dict = {}
+    if not args.no_transform:
+        video_names = [v.name for v in all_videos]
+        ok, msgs = validate_roi_file(
+            roi_path or "(not set in config)", video_names)
+        for m in msgs:
+            print(f"  {m}")
+        if not ok:
+            print()
+            print("   → Fix the issues above.  To pick missing ROIs:")
+            raw = cfg.drive.raw_videos or "(raw_videos path)"
+            roi = roi_path or "(roi_file path)"
+            print(f"     python tools/pick_rois.py pick \\")
+            print(f"         --video-dir {raw} \\")
+            print(f"         --roi-file  {roi}")
+            print()
+            print("   Or pass --no-transform to skip perspective-correction.")
+            sys.exit(1)
+        rois = load_roi_json(roi_path)
+
+    # target_size from config (for perspective transform output)
+    target_size = None
+    if cfg.chamber.target_size:
+        target_size = tuple(cfg.chamber.target_size)
+
+    # ── 3. Probe videos (fps, frame count) ────────────────────────────
+    video_info = probe_videos(all_videos)
+    min_total_sec = args.duration + 10
+    eligible = {v: info for v, info in video_info.items()
+                if info["total_sec"] >= min_total_sec}
+    if not eligible:
+        print(f"❌ No videos long enough (need ≥ {min_total_sec:.0f}s)")
+        sys.exit(1)
+    print(f"   {len(eligible)}/{len(all_videos)} are long enough "
+          f"(≥ {min_total_sec:.0f}s)")
+
+    # ── 4. Build weighted sampling pool ───────────────────────────────
+    pool_videos = list(eligible.keys())
+    pool_weights = [eligible[v]["n_frames"] for v in pool_videos]
+    total_frames = sum(pool_weights)
+    print(f"   Total frames across pool: {total_frames:,}")
+    for v in pool_videos:
+        pct = eligible[v]["n_frames"] / total_frames * 100
+        print(f"     {v.name}: {eligible[v]['n_frames']:>10,} frames "
+              f"({pct:.1f}%)")
+
+    # ── 5. Load existing intervals ────────────────────────────────
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine target manifest path
     manifest_key  = SPLIT_TO_MANIFEST[args.split]
     manifest_path = getattr(cfg.drive, manifest_key, None)
     if not manifest_path:
         print(f"❌ Manifest path for '{args.split}' not set in config.")
         sys.exit(1)
 
-    # Find all source videos
-    video_exts = {".mkv", ".mp4", ".avi", ".mov"}
-    all_videos = [
-        p for p in Path(raw_dir).rglob("*")
-        if p.suffix.lower() in video_exts
-    ]
-    if not all_videos:
-        print(f"❌ No videos found in {raw_dir}")
-        sys.exit(1)
-
-    # Build existing intervals to avoid
     existing_intervals = load_all_sampled_intervals(cfg)
-    print(f"ℹ️  {len(existing_intervals)} intervals already sampled across all splits.")
+    print(f"ℹ️  {len(existing_intervals)} intervals already sampled "
+          f"across all splits.")
+    print(f"   Min gap between clips: {args.min_gap} min ({min_gap_sec:.0f}s)")
 
-    new_rows    = []
+    # ── 6. Sample loop ────────────────────────────────────────────
+    new_rows: list[dict] = []
     attempts    = 0
-    max_attempts = args.n * 50   # give up after this many tries
+    max_attempts = args.n * 100
+
+    # Pre-build transformers (one per video)
+    transformers: dict[str, PerspectiveTransformer] = {}
+    if rois:
+        for v in pool_videos:
+            corners = find_roi_for_video(rois, v.name)
+            if corners:
+                transformers[v.name] = PerspectiveTransformer(
+                    corners, target_size)
+
+    print(f"\n🎲 Sampling {args.n} clips × {args.duration}s "
+          f"(seed={args.seed}) ...\n")
 
     while len(new_rows) < args.n and attempts < max_attempts:
         attempts += 1
-        video = random.choice(all_videos)
 
-        cap   = cv2.VideoCapture(str(video))
-        if not cap.isOpened():
-            cap.release()
-            continue
-        fps       = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        n_frames  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
+        # Weighted random pick
+        video = random.choices(pool_videos, weights=pool_weights, k=1)[0]
+        info  = eligible[video]
 
-        total_sec = n_frames / fps
-        if total_sec < args.duration + 10:
-            continue
-
-        start_sec = random.uniform(5, total_sec - args.duration - 5)
+        start_sec = random.uniform(5, info["total_sec"] - args.duration - 5)
         end_sec   = start_sec + args.duration
 
-        if overlaps(start_sec, end_sec, existing_intervals, str(video)):
+        if too_close(start_sec, end_sec, existing_intervals,
+                     video.name, min_gap_sec):
             continue
 
         # Build clip filename
-        split_tag   = args.split.upper()
-        clip_name   = f"{video.stem}_{split_tag}_s{int(start_sec)}.mp4"
-        clip_path   = output_dir / clip_name
+        tfx_tag   = "_transformed" if rois else ""
+        clip_name = f"{video.stem}_s{int(start_sec)}{tfx_tag}.mp4"
+        clip_path = output_dir / clip_name
 
-        print(f"  [{len(new_rows)+1}/{args.n}] Extracting {clip_name} …", end=" ", flush=True)
-        ok = extract_clip(str(video), start_sec, args.duration, str(clip_path))
+        tf = transformers.get(video.name)
+
+        print(f"  [{len(new_rows)+1}/{args.n}] {clip_name} …",
+              end=" ", flush=True)
+        ok = extract_clip(str(video), start_sec, args.duration,
+                          str(clip_path), transformer=tf)
         if not ok:
             print("failed")
             continue
 
         print("✅")
         row = {
-            "Clip_Filename":        clip_name,
-            "Original_Video_Path":  str(video),
-            "Start_Time":           f"{start_sec:.2f}",
-            "Duration":             f"{args.duration:.1f}",
+            "Clip_Filename":       clip_name,
+            "Original_Video_Path": str(video),
+            "Start_Time":          f"{start_sec:.2f}",
+            "Duration":            f"{args.duration:.1f}",
         }
         new_rows.append(row)
-        # Register immediately so subsequent iterations don't re-use the window
-        existing_intervals.append((str(video), start_sec, end_sec))
+        existing_intervals.append((video.name, start_sec, end_sec))
 
     if len(new_rows) < args.n:
-        print(f"⚠️  Only found {len(new_rows)}/{args.n} non-overlapping clips "
-              f"after {attempts} attempts.")
+        print(f"\n⚠️  Only found {len(new_rows)}/{args.n} non-overlapping "
+              f"clips after {attempts} attempts.")
 
     if new_rows:
         append_to_manifest(manifest_path, new_rows)
