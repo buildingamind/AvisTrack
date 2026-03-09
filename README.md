@@ -15,12 +15,13 @@
 6. [Quick Start (New Experiment)](#6-quick-start-new-experiment)
 7. [Configuration](#7-configuration)
 8. [Tools](#8-tools)
-9. [Dataset & Sampling Workflow](#9-dataset--sampling-workflow)
-10. [Offline Batch Processing](#10-offline-batch-processing)
-11. [Model Evaluation](#11-model-evaluation)
-12. [Real-time Integration (ChamberBroadcaster)](#12-real-time-integration-chamberbroadcaster)
-13. [Running Tests](#13-running-tests)
-14. [Common Recipes](#14-common-recipes)
+9. [Time Calibration](#9-time-calibration)
+10. [Dataset & Sampling Workflow](#10-dataset--sampling-workflow)
+11. [Offline Batch Processing](#11-offline-batch-processing)
+12. [Model Evaluation](#12-model-evaluation)
+13. [Real-time Integration (ChamberBroadcaster)](#13-real-time-integration-chamberbroadcaster)
+14. [Running Tests](#14-running-tests)
+15. [Common Recipes](#15-common-recipes)
 
 ---
 
@@ -155,7 +156,8 @@ AvisTrack/
 │   │
 │   ├── core/
 │   │   ├── transformer.py        # Perspective transform (optional pipeline step)
-│   │   └── frame_source.py       # Unified frame iterator (file or live camera)
+│   │   ├── frame_source.py       # Unified frame iterator (file or live camera)
+│   │   └── time_lookup.py        # Frame↔time bidirectional conversion (OCR calibration)
 │   │
 │   └── config/
 │       ├── schema.py             # Pydantic v2 config schema
@@ -169,7 +171,8 @@ AvisTrack/
 ├── tools/
 │   ├── init_config.py            # ★ Interactive config wizard — creates YAML configs
 │   ├── pick_rois.py              # ROI picker + validator → camera_rois.json
-│   └── sample_clips.py           # Sample clips from raw videos with ROI transform
+│   ├── sample_clips.py           # Sample clips from raw videos with ROI transform
+│   └── calibrate_time.py         # OCR-based frame↔time calibration (Google Vision)
 │
 ├── eval/
 │   └── run_eval.py               # Compare multiple weight files on test set → CSV report
@@ -179,7 +182,8 @@ AvisTrack/
 │
 ├── tests/
 │   ├── test_config.py
-│   └── test_transformer.py
+│   ├── test_transformer.py
+│   └── test_time_lookup.py       # TimeLookup interpolation + round-trip tests
 │
 ├── pyproject.toml
 ├── requirements.txt
@@ -219,7 +223,7 @@ pip install -r requirements.txt
 
 ```bash
 conda run -n avistrack python -m pytest tests/ -v
-# Expected: 6 passed
+# Expected: 25 passed
 ```
 
 ---
@@ -292,7 +296,39 @@ Then validate that every video is covered:
 python tools/pick_rois.py validate --config configs/wave2_collective.yaml
 ```
 
-### Step 3: Sample training / val / test clips
+### Step 3: Calibrate frame↔time mapping (if videos have burn-in timestamps)
+
+If your videos have a burn-in timestamp overlay (e.g. security camera style), you can build a frame → real-time mapping using sparse OCR. **Do this before sampling clips** so that time-based exclusions and intervals can be applied.
+
+```bash
+# 3a. Pick the timestamp region on each video
+python tools/calibrate_time.py roi --config configs/wave2_collective.yaml
+
+# 3b. Run calibration (shows cost estimate, preview, auto-detects format, then asks to confirm)
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+python tools/calibrate_time.py calibrate --config configs/wave2_collective.yaml
+
+# 3c. Post-process: fix OCR errors using monotonicity + interpolation
+python tools/calibrate_time.py postprocess --config configs/wave2_collective.yaml
+
+# 3d. Verify accuracy
+python tools/calibrate_time.py verify --config configs/wave2_collective.yaml
+```
+
+The `calibrate` step auto-detects the timestamp format from the OCR text (e.g. `08:35:30 PM 18-Jun-25`). Timezone indicators like `EST`, `UTC-5` are automatically stripped — the authoritative timezone comes from the YAML config.
+
+The `postprocess` step fixes common OCR failures (missing seconds, garbled digits, API errors) using monotonicity constraints and linear interpolation between good samples. Typically recovers 95%+ of failed samples.
+
+This creates `time_calibration.json` on the drive. Use `TimeLookup` in code to convert between frames and wall-clock time:
+
+```python
+from avistrack.core.time_lookup import TimeLookup
+tl = TimeLookup.load("time_calibration.json", "Video_RGB.mkv")
+tl.frame_to_datetime(5000)   # → timezone-aware datetime
+tl.unix_to_frame(1730264567) # → frame index
+```
+
+### Step 4: Sample training / val / test clips
 
 ```bash
 # Training clips: 20 clips × 3 seconds each
@@ -330,7 +366,7 @@ python tools/sample_clips.py \
 > | 600 frames    | 30  | `20`        |
 > | 900 frames    | 30  | `30`        |
 
-### Step 4: Train your model (outside AvisTrack)
+### Step 5: Train your model (outside AvisTrack)
 
 Label the sampled clips in CVAT / Roboflow / Label Studio, then train YOLO:
 
@@ -340,7 +376,7 @@ yolo detect train data=dataset.yaml model=yolo11n.pt epochs=100 imgsz=640
 
 Put the resulting `best.pt` into `03_Model_Training/` on the drive and update the `model.weights` path in your config.
 
-### Step 5: Evaluate model performance
+### Step 6: Evaluate model performance
 
 ```bash
 python eval/run_eval.py \
@@ -349,7 +385,7 @@ python eval/run_eval.py \
     --output  eval/reports/wave2_coll.csv
 ```
 
-### Step 6: Run batch processing on all raw videos
+### Step 7: Run batch processing on all raw videos
 
 ```bash
 python cli/run_batch.py --config configs/wave2_collective.yaml
@@ -379,6 +415,8 @@ drive:
   root:           "/media/woodlab/104-A/Wave3"
   raw_videos:     "{root}/00_raw_videos"
   roi_file:       "{root}/02_Global_Metadata/camera_rois.json"
+  ocr_roi:        "{root}/02_Global_Metadata/ocr_roi.json"
+  time_calibration: "{root}/02_Global_Metadata/time_calibration.json"
   train_manifest: "{root}/02_Global_Metadata/train_data_manifest.txt"
   val_manifest:   "{root}/02_Global_Metadata/val_tuning_manifest.txt"
   test_manifest:  "{root}/02_Global_Metadata/test_golden_manifest.txt"
@@ -404,6 +442,11 @@ pipeline:
 output:
   format: "mot"
   dir:    "{root}/../outputs/W3_COLL"
+
+# Frame↔time mapping (burn-in timestamp OCR)
+time:
+  timezone:    "America/New_York"
+  time_format: "auto"
 ```
 
 ### 7.2 Key reference
@@ -417,6 +460,9 @@ output:
 | `drive.train_manifest` | string | CSV tracking which clips have been sampled for training |
 | `drive.val_manifest` | string | CSV tracking which clips have been sampled for validation |
 | `drive.test_manifest` | string | CSV tracking which clips have been sampled for testing |
+| `drive.ocr_roi` | string | Path to `ocr_roi.json` (burn-in timestamp crop region) |
+| `drive.time_calibration` | string | Path to `time_calibration.json` (frame↔time mapping) |
+| `drive.exclusions` | string | Path to `exclusions.json` (invalid intervals) |
 | `chamber.n_subjects` | int | Number of animals; caps tracked IDs |
 | `chamber.fps` | int | Video framerate |
 | `chamber.target_size` | [w, h] | Inference resolution after perspective warp; `null` = auto |
@@ -428,6 +474,8 @@ output:
 | `pipeline` | list | Steps to run: `transform` (optional) and `track` |
 | `output.format` | string | `"mot"` (txt) or `"parquet"` |
 | `output.dir` | string | Where to write tracking output files |
+| `time.timezone` | string | IANA timezone name (e.g. `America/New_York`), handles DST |
+| `time.time_format` | string | `"auto"` (detect from OCR text) or explicit `strptime` format |
 
 ### 7.3 How `{root}` resolution works
 
@@ -640,7 +688,152 @@ Wave3_..._TRAIN_s49508.mp4, /media/.../Day12_RGB.mkv, 49508.33, 3
 
 ---
 
-## 9. Dataset & Sampling Workflow
+### 8.4 Time calibration — `tools/calibrate_time.py`
+
+Builds a mapping from video frame numbers to wall-clock time using sparse OCR
+of the burn-in timestamp overlay. Uses the **Google Cloud Vision** API.
+
+Four subcommands:
+
+| Subcommand | Purpose |
+|------------|---------|
+| `roi` | Iterate through all videos — pick/confirm the timestamp crop region for each one |
+| `calibrate` | Run sparse OCR across all videos → `time_calibration.json` (auto-detects timestamp format) |
+| `postprocess` | Fix OCR errors using monotonicity constraints + linear interpolation |
+| `verify` | Spot-check calibration accuracy against OCR ground truth |
+
+```bash
+# 1. Set Google Cloud credentials
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+
+# 2. Pick the timestamp region (per-video, previous carries forward)
+python tools/calibrate_time.py roi --config configs/wave3_collective.yaml
+
+# 3. Run calibration (cost estimate → auto-detect format → preview → confirmation → full run)
+python tools/calibrate_time.py calibrate --config configs/wave3_collective.yaml
+
+# 4. Post-process: fix OCR errors using monotonicity + interpolation
+python tools/calibrate_time.py postprocess --config configs/wave3_collective.yaml
+
+# 5. Verify accuracy (OCR random frames, compare with interpolation)
+python tools/calibrate_time.py verify --config configs/wave3_collective.yaml
+```
+
+**Calibrate flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | (required) | YAML config file |
+| `--interval` | `1000` | OCR every N frames (lower = more accurate, more API calls) |
+| `--force` | `false` | Re-calibrate videos that already have data |
+
+**Calibrate workflow:**
+
+1. **Probe** all videos → estimate total API calls
+2. **Cost estimate box** — shows per-video call counts, estimated USD cost
+3. **First confirmation** — user approves the plan
+4. **Auto-detect format** — if `time_format` is `"auto"` (default), tries common formats against the OCR text. Strips timezone indicators (`EST`, `UTC-5`, etc.) automatically.
+5. **Preview** — OCR 3 frames from the first video, show parsed results
+6. **Second confirmation** — user verifies the preview looks correct
+7. **Full run** — OCR all videos with progress bar, save after each video (crash-safe)
+8. **Midnight crossing** — auto-detected when clock jumps backward > 12h
+
+**Postprocess workflow:**
+
+After `calibrate` runs, some OCR samples may fail (garbled text, missing seconds, API errors). The `postprocess` subcommand fixes these:
+
+1. **Missing seconds** — `12:04 AM` → `12:04:00 AM` (re-parsed with `:00` appended)
+2. **Monotonicity filter** — removes samples where time goes backward (impossible)
+3. **Gap interpolation** — fills removed/failed samples using linear interpolation between valid neighbors
+4. **Statistics report** — shows before/after counts, error categories, per-video recovery rate
+
+```bash
+python tools/calibrate_time.py postprocess --config configs/wave2_collective.yaml
+# Saves cleaned data back to time_calibration.json (original backed up as .json.bak)
+```
+
+**Verify flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--n` | `5` | Random frames to check per video |
+
+Verify reports per-check delta (Δ seconds between OCR and interpolation), and
+prints PASS if ≥95% of checks are within 2 seconds.
+
+**Using the calibration in code:**
+
+```python
+from avistrack.core.time_lookup import TimeLookup
+
+tl = TimeLookup.load("time_calibration.json", "Day12_RGB.mkv")
+
+# Frame → time
+tl.frame_to_datetime(5000)       # timezone-aware datetime
+tl.frame_to_unix(5000)           # float Unix timestamp
+tl.frame_to_timestr(5000)        # "2025-10-30 00:02:47"
+
+# Time → frame
+tl.unix_to_frame(1730264567.0)   # 5000
+tl.datetime_to_frame(some_dt)    # nearest frame
+
+# Diagnostics
+tl.actual_fps(0, 3000)           # effective FPS between two frames
+tl.duration_seconds              # total calibrated span
+```
+
+---
+
+## 9. Time Calibration
+
+Many lab video systems have unstable FPS — the nominal 30 fps can drift
+significantly. However, most cameras burn a human-readable timestamp into
+the video frame (typically in the upper-right corner). AvisTrack uses sparse
+OCR to read these timestamps and build a frame↔time mapping.
+
+### How it works
+
+```
+Frame indices:     0        1000      2000      3000      ...
+                   │         │         │         │
+     OCR →        12:00:00  12:00:34  12:01:07  12:01:40  ...
+                   │         │         │         │
+                   └─────────┼─────────┼─────────┘
+                         piecewise-linear interpolation
+                              (numpy.interp)
+```
+
+1. **`roi`** — for each video, you draw a rectangle around the timestamp text
+   (previous video's region carries forward as default, just like `pick_rois.py`)
+2. **`calibrate`** — the tool OCRs every N-th frame (default 1000), parsing
+   the text into a datetime. The timestamp format is auto-detected from the
+   OCR text (supports `08:35:30 PM EST 18-Jun-25`, `20:35:30 UTC-5`, etc.).
+   These sparse anchor points are saved to `time_calibration.json`.
+3. **`postprocess`** — fixes OCR errors (missing seconds, garbled digits, API
+   failures) using monotonicity constraints and linear interpolation.
+4. **`TimeLookup`** uses `numpy.interp` to interpolate between anchors,
+   giving sub-second accuracy for any frame in between.
+
+### Data files
+
+| File | Location | Content |
+|------|----------|---------|
+| `ocr_roi.json` | `02_Global_Metadata/` | `{"video_name": [x, y, w, h], ...}` — per-video crop region for the timestamp |
+| `time_calibration.json` | `02_Global_Metadata/` | Per-video arrays of `{frame, unix, ocr_raw, time_local}` samples |
+
+### Google Cloud Vision setup
+
+1. Create a Google Cloud project and enable the **Cloud Vision API**
+2. Create a **service account key** (JSON) at [Cloud Console](https://console.cloud.google.com/apis/credentials)
+3. Set the environment variable:
+   ```bash
+   export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+   ```
+4. Pricing: **1,000 free** TEXT_DETECTION calls/month, then $1.50 / 1,000
+
+---
+
+## 10. Dataset & Sampling Workflow
 
 Data on the external drive follows this layout (established in Wave 3):
 
@@ -653,6 +846,8 @@ Data on the external drive follows this layout (established in Wave 3):
 │   └── test_golden/               sampled .mp4 clips + .txt ground truth
 ├── 02_Global_Metadata/
 │   ├── camera_rois.json           {video_name: [[x,y],[x,y],[x,y],[x,y]]}
+│   ├── ocr_roi.json               {video_name: [x, y, w, h]}  (timestamp crop per video)
+│   ├── time_calibration.json      frame↔unix mapping per video
 │   ├── train_data_manifest.txt    Clip_Filename, Original_Video_Path, Start_Time, Duration
 │   ├── val_tuning_manifest.txt
 │   ├── test_golden_manifest.txt
@@ -680,29 +875,35 @@ Data on the external drive follows this layout (established in Wave 3):
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│  3. Sample train clips          │  python tools/sample_clips.py --split train ...
+│  3. Calibrate frame↔time       │  python tools/calibrate_time.py roi ...
+│     (if burn-in timestamps)    │  python tools/calibrate_time.py calibrate ...
+│     + Post-process OCR errors   │  python tools/calibrate_time.py postprocess ...
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│  4. Label clips in CVAT         │  (external tool)
+│  4. Sample train clips          │  python tools/sample_clips.py --split train ...
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│  5. Label clips in CVAT         │  (external tool)
 │     + Train YOLO                │  yolo detect train ...
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│  5. Sample golden test clips    │  python tools/sample_clips.py --split test ...
+│  6. Sample golden test clips    │  python tools/sample_clips.py --split test ...
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│  6. Label test clips GT         │  (manual annotation in MOT format)
+│  7. Label test clips GT         │  (manual annotation in MOT format)
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│  7. Evaluate model              │  python eval/run_eval.py ...
-│     Not good enough? → go to 3  │
+│  8. Evaluate model              │  python eval/run_eval.py ...
+│     Not good enough? → go to 4  │
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│  8. Batch process all videos    │  python cli/run_batch.py --config ...
+│  9. Batch process all videos    │  python cli/run_batch.py --config ...
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
@@ -712,7 +913,7 @@ Data on the external drive follows this layout (established in Wave 3):
 
 ---
 
-## 10. Offline Batch Processing
+## 11. Offline Batch Processing
 
 Processes **all** raw videos with a single command. Supports:
 - Automatic resume (skips files whose output already exists)
@@ -735,7 +936,7 @@ Output is written to the `output.dir` path set in the config. Each video produce
 
 ---
 
-## 11. Model Evaluation
+## 12. Model Evaluation
 
 Compare multiple trained weight files on the same test set. For each clip in `01_Dataset_MOT_Format/test_golden/`, a matching `.txt` ground-truth file must exist in the same folder (MOT format).
 
@@ -757,7 +958,7 @@ python eval/run_eval.py \
 
 ---
 
-## 12. Real-time Integration (ChamberBroadcaster)
+## 13. Real-time Integration (ChamberBroadcaster)
 
 AvisTrack is installed as a package in ChamberBroadcaster's environment:
 
@@ -816,7 +1017,7 @@ The existing `YoloKalmanProcessor`, `JoshuTrackingProcessor`, and `DLCTrackingPr
 
 ---
 
-## 13. Running Tests
+## 14. Running Tests
 
 ```bash
 conda activate avistrack
@@ -827,17 +1028,22 @@ python -m pytest tests/ -v
 ```
 tests/test_config.py::test_load_minimal_config              PASSED
 tests/test_config.py::test_root_placeholder_resolution      PASSED
+tests/test_time_lookup.py::TestInterpolation::...           PASSED  (x3)
+tests/test_time_lookup.py::TestReverse::...                 PASSED  (x2)
+tests/test_time_lookup.py::TestDatetime::...                PASSED  (x4)
+tests/test_time_lookup.py::TestProperties::...              PASSED  (x4)
+tests/test_time_lookup.py::TestConstruction::...            PASSED  (x6)
 tests/test_transformer.py::test_transform_output_size_fixed PASSED
 tests/test_transformer.py::test_transform_output_size_auto  PASSED
 tests/test_transformer.py::test_from_roi_file               PASSED
 tests/test_transformer.py::test_from_roi_file_missing_key   PASSED
 
-6 passed in 0.20s
+25 passed in 0.25s
 ```
 
 ---
 
-## 14. Common Recipes
+## 15. Common Recipes
 
 ### Sample 20 golden-test clips with 600 frames each
 
@@ -864,23 +1070,28 @@ python tools/pick_rois.py --config configs/wave4_collective.yaml
 # 2b. Validate ROIs
 python tools/pick_rois.py validate --config configs/wave4_collective.yaml
 
-# 3. Sample training clips
+# 3. Calibrate frame↔time mapping (if burn-in timestamps exist)
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+python tools/calibrate_time.py roi --config configs/wave4_collective.yaml
+python tools/calibrate_time.py calibrate --config configs/wave4_collective.yaml
+
+# 4. Sample training clips
 python tools/sample_clips.py \
     --config configs/wave4_collective.yaml --split train --n 30 --duration 3 \
     --output-dir /media/woodlab/NEW_DRIVE/Wave4/01_Dataset_MOT_Format/train
 
-# 4. (Label in CVAT → Train YOLO → put best.pt on drive)
+# 5. (Label in CVAT → Train YOLO → put best.pt on drive)
 
-# 5. Sample test clips (600 frames = 20 sec @ 30fps)
+# 6. Sample test clips (600 frames = 20 sec @ 30fps)
 python tools/sample_clips.py \
     --config configs/wave4_collective.yaml --split test --n 20 --duration 20 \
     --output-dir /media/woodlab/NEW_DRIVE/Wave4/01_Dataset_MOT_Format/test_golden
 
-# 6. Evaluate
+# 7. Evaluate
 python eval/run_eval.py --config configs/wave4_collective.yaml \
     --weights /media/.../best.pt --output eval/reports/wave4.csv
 
-# 7. Batch process everything
+# 8. Batch process everything
 python cli/run_batch.py --config configs/wave4_collective.yaml
 ```
 

@@ -42,15 +42,27 @@ class DriveConfig(BaseModel):
     All paths are strings; they are NOT validated to exist at config-load time
     because the drive may not always be mounted when editing configs.
     """
-    root:            Optional[str] = None
-    raw_videos:      Optional[str] = None
-    dataset:         Optional[str] = None
-    metadata:        Optional[str] = None
-    roi_file:        Optional[str] = None
-    exclusions:      Optional[str] = None     # path to exclusions.json
-    train_manifest:  Optional[str] = None
-    val_manifest:    Optional[str] = None
-    test_manifest:   Optional[str] = None
+    root:              Optional[str] = None
+    raw_videos:        Optional[str] = None
+    dataset:           Optional[str] = None
+    metadata:          Optional[str] = None
+    roi_file:          Optional[str] = None
+    exclusions:        Optional[str] = None     # path to exclusions.json
+    ocr_roi:           Optional[str] = None     # path to ocr_roi.json
+    time_calibration:  Optional[str] = None     # path to time_calibration.json
+    train_manifest:    Optional[str] = None
+    val_manifest:      Optional[str] = None
+    test_manifest:     Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class TimeConfig(BaseModel):
+    """
+    Settings for burn-in timestamp OCR and time calibration.
+    """
+    timezone:    str = "America/New_York"   # IANA tz name (handles DST)
+    time_format: str = "auto"               # "auto" to detect, or strptime format
 
     model_config = {"extra": "allow"}
 
@@ -60,6 +72,7 @@ class AvisTrackConfig(BaseModel):
     model:      ModelConfig
     chamber:    ChamberConfig
     drive:      DriveConfig = DriveConfig()
+    time:       TimeConfig  = TimeConfig()
 
     model_config = {"extra": "allow"}
 

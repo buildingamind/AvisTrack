@@ -106,6 +106,9 @@ def _generate_yaml(c: dict) -> str:
         f'  dataset:        "{_rel(c["dataset"])}"',
         f'  metadata:       "{_rel(c["metadata"])}"',
         f'  roi_file:       "{_rel(c["roi_file"])}"',
+        f'  exclusions:     "{_rel(c["exclusions"])}"',
+        f'  ocr_roi:        "{_rel(c["ocr_roi"])}"',
+        f'  time_calibration: "{_rel(c["time_calibration"])}"',
         f'  train_manifest: "{_rel(c["train_manifest"])}"',
         f'  val_manifest:   "{_rel(c["val_manifest"])}"',
         f'  test_manifest:  "{_rel(c["test_manifest"])}"',
@@ -141,6 +144,12 @@ def _generate_yaml(c: dict) -> str:
         "output:",
         f'  format: "{c["output_format"]}"',
         f'  dir:    "{_rel(c["output_dir"])}"',
+        "",
+        "# ── Time calibration ───────────────────────────────────────────",
+        "# Used by tools/calibrate_time.py to map frame↔burn-in time via OCR.",
+        "time:",
+        f'  timezone:    "{c.get("timezone", "America/New_York")}"',
+        f'  time_format: "{c.get("time_format", "%I:%M:%S %p")}"',
         "",
     ]
 
@@ -312,6 +321,17 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
     _make_path_row(sec3, "metadata",         var_meta,    "dir").pack(fill="x", **PAD)
     _make_path_row(sec3, "ROI file (.json)", var_roi,     "file",
                    filetypes=[("JSON", "*.json"), ("All", "*.*")]).pack(fill="x", **PAD)
+
+    var_exclusions = tk.StringVar()
+    var_ocr_roi    = tk.StringVar()
+    var_time_cal   = tk.StringVar()
+    _make_path_row(sec3, "exclusions (.json)", var_exclusions, "file",
+                   filetypes=[("JSON", "*.json"), ("All", "*.*")]).pack(fill="x", **PAD)
+    _make_path_row(sec3, "ocr_roi (.json)",    var_ocr_roi,   "file",
+                   filetypes=[("JSON", "*.json"), ("All", "*.*")]).pack(fill="x", **PAD)
+    _make_path_row(sec3, "time_calibration",   var_time_cal,  "file",
+                   filetypes=[("JSON", "*.json"), ("All", "*.*")]).pack(fill="x", **PAD)
+
     _make_path_row(sec3, "train manifest",   var_train_m, "file",
                    filetypes=[("Text/CSV", "*.txt *.csv"), ("All", "*.*")]).pack(fill="x", **PAD)
     _make_path_row(sec3, "val manifest",     var_val_m,   "file",
@@ -343,6 +363,9 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
         meta = var_meta.get()
         roi = _find_roi_file(r)
         var_roi.set(roi or f"{meta}/camera_rois.json")
+        var_exclusions.set(f"{meta}/exclusions.json")
+        var_ocr_roi.set(f"{meta}/ocr_roi.json")
+        var_time_cal.set(f"{meta}/time_calibration.json")
         var_train_m.set(f"{meta}/train_data_manifest.txt")
         var_val_m.set(f"{meta}/val_tuning_manifest.txt")
         var_test_m.set(f"{meta}/test_golden_manifest.txt")
@@ -468,6 +491,30 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
     var_outdir = tk.StringVar(value="./outputs")
     _make_path_row(sec7, "Output directory", var_outdir, "dir").pack(fill="x", **PAD)
 
+    # ═══ 8. Time Calibration ═════════════════════════════════════════════
+    sec8 = ttk.LabelFrame(scroll_frame, text="  8 ─ Time Calibration  ")
+    sec8.pack(fill="x", padx=12, pady=6)
+    ttk.Label(sec8,
+              text="Used by tools/calibrate_time.py to map video frames to wall-clock time via OCR.",
+              foreground="#6c7086").pack(anchor="w", padx=26, pady=(2, 4))
+
+    var_tz   = tk.StringVar(value="America/New_York")
+    var_tfmt = tk.StringVar(value="%I:%M:%S %p")
+
+    fr8 = ttk.Frame(sec8)
+    sub = ttk.Frame(fr8)
+    ttk.Label(sub, text="Timezone (IANA)", width=18, anchor="e").pack(side="left", **PAD)
+    ttk.Entry(sub, textvariable=var_tz, width=30).pack(side="left", **PAD)
+    ttk.Label(sub, text="e.g. America/New_York", foreground="#6c7086").pack(side="left", padx=4)
+    sub.pack(fill="x")
+
+    sub2 = ttk.Frame(fr8)
+    ttk.Label(sub2, text="Time format", width=18, anchor="e").pack(side="left", **PAD)
+    ttk.Entry(sub2, textvariable=var_tfmt, width=30).pack(side="left", **PAD)
+    ttk.Label(sub2, text="strptime format for burn-in text", foreground="#6c7086").pack(side="left", padx=4)
+    sub2.pack(fill="x")
+    fr8.pack(fill="x", **PAD)
+
     # ═══ Status bar ══════════════════════════════════════════════════════
     status_bar = ttk.Label(scroll_frame, text="", style="Status.TLabel")
     status_bar.pack(fill="x", padx=16, pady=(8, 2))
@@ -496,6 +543,9 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
             "dataset":         var_dataset.get() or f"{r}/01_Dataset_MOT_Format",
             "metadata":        var_meta.get()    or f"{r}/02_Global_Metadata",
             "roi_file":        var_roi.get()     or f"{r}/02_Global_Metadata/camera_rois.json",
+            "exclusions":      var_exclusions.get() or f"{r}/02_Global_Metadata/exclusions.json",
+            "ocr_roi":         var_ocr_roi.get()    or f"{r}/02_Global_Metadata/ocr_roi.json",
+            "time_calibration": var_time_cal.get()   or f"{r}/02_Global_Metadata/time_calibration.json",
             "train_manifest":  var_train_m.get() or f"{r}/02_Global_Metadata/train_data_manifest.txt",
             "val_manifest":    var_val_m.get()   or f"{r}/02_Global_Metadata/val_tuning_manifest.txt",
             "test_manifest":   var_test_m.get()  or f"{r}/02_Global_Metadata/test_golden_manifest.txt",
@@ -511,6 +561,8 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
             "pipeline":        pipeline,
             "output_format":   var_fmt.get(),
             "output_dir":      var_outdir.get() or f"{r}/../outputs/{name}",
+            "timezone":        var_tz.get()  or "America/New_York",
+            "time_format":     var_tfmt.get() or "%I:%M:%S %p",
         }
 
         warnings = _validate_config(cfg)
@@ -639,10 +691,10 @@ def _run_cli(prefill_root=None, prefill_name=None, output_path=None):
 
     cfg = {}
 
-    print(f"{BOLD}{BLUE}── 1/7  Experiment Name ──{RESET}")
+    print(f"{BOLD}{BLUE}── 1/8  Experiment Name ──{RESET}")
     cfg["experiment"] = _cli_ask("Experiment name", default=prefill_name)
 
-    print(f"\n{BOLD}{BLUE}── 2/7  Experiment Root ──{RESET}")
+    print(f"\n{BOLD}{BLUE}── 2/8  Experiment Root ──{RESET}")
     print("  (Top-level folder for this experiment, e.g. /media/.../Wave2)")
     cfg["root"] = _cli_ask_path("Experiment root path", default=prefill_root, must_exist=False)
     root = cfg["root"]
@@ -650,7 +702,7 @@ def _run_cli(prefill_root=None, prefill_name=None, output_path=None):
     if detected:
         print(f"  {GREEN}✓ Found: {', '.join(detected.keys())}{RESET}")
 
-    print(f"\n{BOLD}{BLUE}── 3/7  Drive Paths ──{RESET}")
+    print(f"\n{BOLD}{BLUE}── 3/8  Drive Paths ──{RESET}")
     def _dod(key, fallback): return detected.get(key, f"{root}/{fallback}")
     cfg["raw_videos"]     = _cli_ask_path("raw_videos dir",   _dod("raw_videos", "00_raw_videos"),      check_warning=Path(root).exists())
     cfg["dataset"]        = _cli_ask_path("dataset dir",      _dod("dataset",    "01_Dataset_MOT_Format"), check_warning=False)
@@ -658,17 +710,20 @@ def _run_cli(prefill_root=None, prefill_name=None, output_path=None):
     roi = _find_roi_file(root)
     cfg["roi_file"]       = _cli_ask_path("ROI file",         roi or f"{cfg['metadata']}/camera_rois.json", check_warning=False)
     meta = cfg["metadata"]
+    cfg["exclusions"]      = _cli_ask_path("exclusions.json",   f"{meta}/exclusions.json",         check_warning=False)
+    cfg["ocr_roi"]         = _cli_ask_path("ocr_roi.json",     f"{meta}/ocr_roi.json",            check_warning=False)
+    cfg["time_calibration"] = _cli_ask_path("time_calibration", f"{meta}/time_calibration.json",   check_warning=False)
     cfg["train_manifest"] = _cli_ask_path("train manifest",   f"{meta}/train_data_manifest.txt",  check_warning=False)
     cfg["val_manifest"]   = _cli_ask_path("val manifest",     f"{meta}/val_tuning_manifest.txt",  check_warning=False)
     cfg["test_manifest"]  = _cli_ask_path("test manifest",    f"{meta}/test_golden_manifest.txt", check_warning=False)
 
-    print(f"\n{BOLD}{BLUE}── 4/7  Chamber ──{RESET}")
+    print(f"\n{BOLD}{BLUE}── 4/8  Chamber ──{RESET}")
     cfg["n_subjects"] = _cli_ask_int("Number of subjects", 9)
     cfg["fps"]        = _cli_ask_int("Video FPS", 30)
     cfg["target_w"]   = _cli_ask_int("Inference width", 640)
     cfg["target_h"]   = _cli_ask_int("Inference height", 640)
 
-    print(f"\n{BOLD}{BLUE}── 5/7  Model ──{RESET}")
+    print(f"\n{BOLD}{BLUE}── 5/8  Model ──{RESET}")
     cfg["backend"]    = _cli_ask_choice("Backend", ["yolo", "dlc", "vit"], "yolo")
     cfg["model_mode"] = _cli_ask_choice("Mode", ["offline", "realtime"], "offline") \
                         if cfg["backend"] == "yolo" else "offline"
@@ -692,14 +747,19 @@ def _run_cli(prefill_root=None, prefill_name=None, output_path=None):
         ch = _cli_ask("Weights path (or press Enter to skip)", required=False)
         cfg["weights"] = os.path.expanduser(ch) if ch else ""
 
-    print(f"\n{BOLD}{BLUE}── 6/7  Tracking & Pipeline ──{RESET}")
+    print(f"\n{BOLD}{BLUE}── 6/8  Tracking & Pipeline ──{RESET}")
     cfg["conf_threshold"] = _cli_ask_float("Confidence threshold", 0.2)
     cfg["max_gap_frames"] = _cli_ask_int("Max gap frames", 30)
     cfg["pipeline"] = (["transform"] if _cli_ask_yes_no("Include perspective transform?", True) else []) + ["track"]
 
-    print(f"\n{BOLD}{BLUE}── 7/7  Output ──{RESET}")
+    print(f"\n{BOLD}{BLUE}── 7/8  Output ──{RESET}")
     cfg["output_format"] = _cli_ask_choice("Format", ["mot", "parquet"], "mot")
     cfg["output_dir"]    = _cli_ask_path("Output directory", f"{root}/../outputs/{cfg['experiment']}", check_warning=False)
+
+    print(f"\n{BOLD}{BLUE}── 8/8  Time Calibration ──{RESET}")
+    print("  (Used by tools/calibrate_time.py to map frame↔burn-in time via OCR)")
+    cfg["timezone"]    = _cli_ask("Timezone (IANA)", "America/New_York")
+    cfg["time_format"] = _cli_ask("Time format (strptime)", "%I:%M:%S %p")
 
     # Summary
     print(f"\n{BOLD}{'─'*50}{RESET}")

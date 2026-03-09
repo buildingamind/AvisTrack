@@ -16,6 +16,8 @@ drive:
   metadata:       "{root}/02_Global_Metadata"
   roi_file:       "{root}/02_Global_Metadata/camera_rois.json"
   exclusions:     "{root}/02_Global_Metadata/exclusions.json"
+  ocr_roi:        "{root}/02_Global_Metadata/ocr_roi.json"
+  time_calibration: "{root}/02_Global_Metadata/time_calibration.json"
 
   train_manifest: "{root}/02_Global_Metadata/train_data_manifest.txt"
   val_manifest:   "{root}/02_Global_Metadata/val_tuning_manifest.txt"
@@ -50,3 +52,9 @@ pipeline:
 output:
   format: "mot"          # "mot" (txt) or "parquet"
   dir:    "./outputs"    # local output directory
+
+# ── Time calibration ──────────────────────────────────────────
+# Used by tools/calibrate_time.py to map frame↔burn-in time via OCR.
+time:
+  timezone:    "America/New_York"        # IANA timezone (handles DST)
+  time_format: "auto"                    # "auto" to detect, or strptime format

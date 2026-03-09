@@ -5,6 +5,7 @@ scipy
 pyyaml
 pydantic>=2.0
 Pillow              # PIL — used by ROI picker for panel rendering
+google-cloud-vision # Google Cloud Vision OCR (time calibration)
 
 # Tracking / ML
 ultralytics         # YOLO
