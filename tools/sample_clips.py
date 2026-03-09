@@ -44,8 +44,10 @@ import csv
 import json
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -53,6 +55,7 @@ import numpy as np
 # Allow running without installing the package
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from avistrack.config.loader import load_config
+from avistrack.core.time_lookup import TimeLookup
 from avistrack.core.transformer import PerspectiveTransformer
 from tools.pick_rois import validate_roi_file
 
@@ -207,6 +210,52 @@ def find_roi_for_video(rois: dict, video_name: str) -> Optional[list]:
         if Path(key).stem == stem:
             return corners
     return None
+
+
+# ── Valid range filtering ─────────────────────────────────────────────────
+
+def load_valid_ranges(path: str | None) -> dict:
+    """Load valid_ranges.json → {video_name: [{start, end}, ...]}."""
+    if not path or not Path(path).exists():
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def _parse_ranges(valid_ranges: dict, tz: ZoneInfo) -> dict:
+    """Pre-parse ISO strings into tz-aware datetimes for fast lookup."""
+    parsed: dict[str, list[tuple[datetime, datetime]]] = {}
+    for vname, vranges in valid_ranges.items():
+        parsed[vname] = []
+        for r in vranges:
+            s = datetime.fromisoformat(r["start"]).replace(tzinfo=tz)
+            e = datetime.fromisoformat(r["end"]).replace(tzinfo=tz)
+            parsed[vname].append((s, e))
+    return parsed
+
+
+def in_valid_range(
+    video_name: str,
+    start_sec: float,
+    end_sec: float,
+    fps: float,
+    lookups: dict[str, TimeLookup],
+    parsed_ranges: dict[str, list[tuple[datetime, datetime]]],
+) -> bool:
+    """Return True if the clip falls entirely within a valid range."""
+    if video_name not in parsed_ranges:
+        return False  # video has no valid ranges → exclude
+    if video_name not in lookups:
+        return True   # no calibration → can't check, allow
+
+    lookup = lookups[video_name]
+    start_dt = lookup.frame_to_datetime(int(start_sec * fps))
+    end_dt   = lookup.frame_to_datetime(int(end_sec * fps))
+
+    for rs, re_ in parsed_ranges[video_name]:
+        if start_dt >= rs and end_dt <= re_:
+            return True
+    return False
 
 
 # ── Clip extraction with transform ───────────────────────────────────────
@@ -377,6 +426,41 @@ def main():
           f"across all splits.")
     print(f"   Min gap between clips: {args.min_gap} min ({min_gap_sec:.0f}s)")
 
+    # ── 5b. Load valid ranges (optional filtering) ────────────────
+    vr_path = getattr(cfg.drive, "valid_ranges", None)
+    valid_ranges_raw = load_valid_ranges(vr_path)
+    parsed_ranges: dict = {}
+    lookups: dict[str, TimeLookup] = {}
+
+    if valid_ranges_raw:
+        cal_path = getattr(cfg.drive, "time_calibration", None)
+        if not cal_path or not Path(cal_path).exists():
+            print("❌ valid_ranges.json exists but time_calibration.json "
+                  "not found.")
+            print("   Run `calibrate_time.py calibrate` first.")
+            sys.exit(1)
+        with open(cal_path) as f:
+            calibration = json.load(f)
+        tz_str = cfg.time.timezone
+        tz = ZoneInfo(tz_str)
+        for vname in valid_ranges_raw:
+            if vname in calibration:
+                lookups[vname] = TimeLookup.from_calibration(
+                    calibration, vname, tz_str)
+        parsed_ranges = _parse_ranges(valid_ranges_raw, tz)
+
+        n_ranges = sum(len(v) for v in valid_ranges_raw.values())
+        print(f"⏱️  Valid ranges loaded: {n_ranges} range(s) across "
+              f"{len(valid_ranges_raw)} video(s)")
+
+        # Restrict pool to videos that have valid ranges
+        pool_videos = [v for v in pool_videos if v.name in parsed_ranges]
+        pool_weights = [eligible[v]["n_frames"] for v in pool_videos]
+        if not pool_videos:
+            print("❌ No eligible videos have valid ranges defined.")
+            sys.exit(1)
+        print(f"   Pool narrowed to {len(pool_videos)} video(s)")
+
     # ── 6. Sample loop ────────────────────────────────────────────
     new_rows: list[dict] = []
     attempts    = 0
@@ -407,6 +491,13 @@ def main():
         if too_close(start_sec, end_sec, existing_intervals,
                      video.name, min_gap_sec):
             continue
+
+        # Check valid ranges (if loaded)
+        if parsed_ranges:
+            fps = eligible[video]["fps"]
+            if not in_valid_range(video.name, start_sec, end_sec,
+                                 fps, lookups, parsed_ranges):
+                continue
 
         # Build clip filename
         tfx_tag   = "_transformed" if rois else ""

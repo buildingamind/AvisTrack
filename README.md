@@ -366,6 +366,18 @@ python tools/sample_clips.py \
 > | 600 frames    | 30  | `20`        |
 > | 900 frames    | 30  | `30`        |
 
+### Step 4b: Review clips → record valid ranges (optional)
+
+Manually review the sampled clips. If some clips are from bad time periods (cage cleaning, lights off, etc.), record **valid** time ranges per video so future sampling only draws from approved periods:
+
+```bash
+python tools/edit_valid_ranges.py --config configs/wave2_collective.yaml
+```
+
+The tool shows each video's time span (from calibration) and lets you enter valid wall-clock ranges interactively.  Once `valid_ranges.json` exists, `sample_clips.py` automatically restricts sampling to those ranges.
+
+Then re-sample as needed — only valid time ranges will be used.
+
 ### Step 5: Train your model (outside AvisTrack)
 
 Label the sampled clips in CVAT / Roboflow / Label Studio, then train YOLO:
@@ -686,6 +698,8 @@ Clip_Filename, Original_Video_Path, Start_Time, Duration
 Wave3_..._TRAIN_s49508.mp4, /media/.../Day12_RGB.mkv, 49508.33, 3
 ```
 
+**Valid ranges filtering:** If `valid_ranges.json` exists (created by `edit_valid_ranges.py`), sampling is restricted to the defined time ranges. Videos not listed in the file are excluded entirely. Without the file, all frames are eligible.
+
 ---
 
 ### 8.4 Time calibration — `tools/calibrate_time.py`
@@ -781,6 +795,33 @@ tl.datetime_to_frame(some_dt)    # nearest frame
 tl.actual_fps(0, 3000)           # effective FPS between two frames
 tl.duration_seconds              # total calibrated span
 ```
+
+---
+
+### 8.5 Valid ranges editor — `tools/edit_valid_ranges.py`
+
+Record which wall-clock time ranges are valid for each video. Requires `time_calibration.json` (from Step 3) to display each video's time span.
+
+```bash
+# Add ranges (default subcommand):
+python tools/edit_valid_ranges.py --config configs/wave2_collective.yaml
+
+# Show existing ranges:
+python tools/edit_valid_ranges.py list --config configs/wave2_collective.yaml
+
+# Remove ranges:
+python tools/edit_valid_ranges.py remove --config configs/wave2_collective.yaml
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `add` | Interactively add valid time ranges per video (default) |
+| `list` | Display all recorded ranges |
+| `remove` | Interactively remove ranges |
+
+Time input format: `YYYY-MM-DD HH:MM` (e.g. `2025-06-18 09:00`). The tool shows each video's calibrated time span for reference.
+
+Output file: `valid_ranges.json` at the path set by `drive.valid_ranges` in the config.
 
 ---
 
