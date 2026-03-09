@@ -298,7 +298,7 @@ python tools/pick_rois.py validate --config configs/wave2_collective.yaml
 
 ### Step 3: Calibrate frame↔time mapping (if videos have burn-in timestamps)
 
-If your videos have a burn-in timestamp overlay (e.g. security camera style), you can build a frame → real-time mapping using sparse OCR. **Do this before sampling clips** so that time-based exclusions and intervals can be applied.
+If your videos have a burn-in timestamp overlay (e.g. security camera style), you can build a frame → real-time mapping using sparse OCR. **Do this before sampling clips** so that valid time ranges and intervals can be applied.
 
 ```bash
 # 3a. Pick the timestamp region on each video
@@ -462,7 +462,7 @@ time:
 | `drive.test_manifest` | string | CSV tracking which clips have been sampled for testing |
 | `drive.ocr_roi` | string | Path to `ocr_roi.json` (burn-in timestamp crop region) |
 | `drive.time_calibration` | string | Path to `time_calibration.json` (frame↔time mapping) |
-| `drive.exclusions` | string | Path to `exclusions.json` (invalid intervals) |
+| `drive.valid_ranges` | string | Path to `valid_ranges.json` (valid time intervals) |
 | `chamber.n_subjects` | int | Number of animals; caps tracked IDs |
 | `chamber.fps` | int | Video framerate |
 | `chamber.target_size` | [w, h] | Inference resolution after perspective warp; `null` = auto |

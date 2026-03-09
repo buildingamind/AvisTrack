@@ -47,7 +47,7 @@ class DriveConfig(BaseModel):
     dataset:           Optional[str] = None
     metadata:          Optional[str] = None
     roi_file:          Optional[str] = None
-    exclusions:        Optional[str] = None     # path to exclusions.json
+    valid_ranges:      Optional[str] = None     # path to valid_ranges.json
     ocr_roi:           Optional[str] = None     # path to ocr_roi.json
     time_calibration:  Optional[str] = None     # path to time_calibration.json
     train_manifest:    Optional[str] = None

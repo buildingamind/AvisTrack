@@ -106,7 +106,7 @@ def _generate_yaml(c: dict) -> str:
         f'  dataset:        "{_rel(c["dataset"])}"',
         f'  metadata:       "{_rel(c["metadata"])}"',
         f'  roi_file:       "{_rel(c["roi_file"])}"',
-        f'  exclusions:     "{_rel(c["exclusions"])}"',
+        f'  valid_ranges:   "{_rel(c["valid_ranges"])}"',
         f'  ocr_roi:        "{_rel(c["ocr_roi"])}"',
         f'  time_calibration: "{_rel(c["time_calibration"])}"',
         f'  train_manifest: "{_rel(c["train_manifest"])}"',
@@ -322,10 +322,10 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
     _make_path_row(sec3, "ROI file (.json)", var_roi,     "file",
                    filetypes=[("JSON", "*.json"), ("All", "*.*")]).pack(fill="x", **PAD)
 
-    var_exclusions = tk.StringVar()
-    var_ocr_roi    = tk.StringVar()
-    var_time_cal   = tk.StringVar()
-    _make_path_row(sec3, "exclusions (.json)", var_exclusions, "file",
+    var_valid_ranges = tk.StringVar()
+    var_ocr_roi      = tk.StringVar()
+    var_time_cal     = tk.StringVar()
+    _make_path_row(sec3, "valid_ranges (.json)", var_valid_ranges, "file",
                    filetypes=[("JSON", "*.json"), ("All", "*.*")]).pack(fill="x", **PAD)
     _make_path_row(sec3, "ocr_roi (.json)",    var_ocr_roi,   "file",
                    filetypes=[("JSON", "*.json"), ("All", "*.*")]).pack(fill="x", **PAD)
@@ -363,7 +363,7 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
         meta = var_meta.get()
         roi = _find_roi_file(r)
         var_roi.set(roi or f"{meta}/camera_rois.json")
-        var_exclusions.set(f"{meta}/exclusions.json")
+        var_valid_ranges.set(f"{meta}/valid_ranges.json")
         var_ocr_roi.set(f"{meta}/ocr_roi.json")
         var_time_cal.set(f"{meta}/time_calibration.json")
         var_train_m.set(f"{meta}/train_data_manifest.txt")
@@ -543,7 +543,7 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
             "dataset":         var_dataset.get() or f"{r}/01_Dataset_MOT_Format",
             "metadata":        var_meta.get()    or f"{r}/02_Global_Metadata",
             "roi_file":        var_roi.get()     or f"{r}/02_Global_Metadata/camera_rois.json",
-            "exclusions":      var_exclusions.get() or f"{r}/02_Global_Metadata/exclusions.json",
+            "valid_ranges":    var_valid_ranges.get() or f"{r}/02_Global_Metadata/valid_ranges.json",
             "ocr_roi":         var_ocr_roi.get()    or f"{r}/02_Global_Metadata/ocr_roi.json",
             "time_calibration": var_time_cal.get()   or f"{r}/02_Global_Metadata/time_calibration.json",
             "train_manifest":  var_train_m.get() or f"{r}/02_Global_Metadata/train_data_manifest.txt",
@@ -710,7 +710,7 @@ def _run_cli(prefill_root=None, prefill_name=None, output_path=None):
     roi = _find_roi_file(root)
     cfg["roi_file"]       = _cli_ask_path("ROI file",         roi or f"{cfg['metadata']}/camera_rois.json", check_warning=False)
     meta = cfg["metadata"]
-    cfg["exclusions"]      = _cli_ask_path("exclusions.json",   f"{meta}/exclusions.json",         check_warning=False)
+    cfg["valid_ranges"]    = _cli_ask_path("valid_ranges.json", f"{meta}/valid_ranges.json",       check_warning=False)
     cfg["ocr_roi"]         = _cli_ask_path("ocr_roi.json",     f"{meta}/ocr_roi.json",            check_warning=False)
     cfg["time_calibration"] = _cli_ask_path("time_calibration", f"{meta}/time_calibration.json",   check_warning=False)
     cfg["train_manifest"] = _cli_ask_path("train manifest",   f"{meta}/train_data_manifest.txt",  check_warning=False)

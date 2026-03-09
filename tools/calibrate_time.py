@@ -302,6 +302,15 @@ def parse_time(
     Returns ``(datetime, unix_timestamp)`` or ``(None, 0.0)`` on failure.
     """
     cleaned = clean_ocr_text(text)
+
+    # If format is "auto", try to auto-detect from the text
+    if time_format.lower() == "auto":
+        detected_fmt, _ = detect_time_format(cleaned)
+        if detected_fmt:
+            time_format = detected_fmt
+        else:
+            return None, 0.0
+
     try:
         parsed = datetime.strptime(cleaned, time_format)
     except ValueError:
@@ -1469,6 +1478,14 @@ def cmd_verify(args):
     t_fmt = cfg.time.time_format
     tz = ZoneInfo(tz_str)
 
+    # Resolve "auto" — prefer the format stored during calibration
+    if t_fmt.lower() == "auto":
+        meta_fmt = calibration.get("_meta", {}).get("time_format", "")
+        if meta_fmt and meta_fmt.lower() != "auto":
+            t_fmt = meta_fmt
+            print(f"ℹ️  Using time format from calibration metadata: \"{t_fmt}\"")
+        # If still "auto", will auto-detect from first OCR result below
+
     cal_videos = [k for k in calibration if k != "_meta"]
     if not cal_videos:
         print("❌ No calibrated videos found")
@@ -1533,8 +1550,16 @@ def cmd_verify(args):
             crop = frame[ry : ry + rh, rx : rx + rw]
             text, conf = google_ocr(client, crop)
 
+            # Auto-detect format from first OCR text if still "auto"
+            if t_fmt.lower() == "auto" and text:
+                detected_fmt, _ = detect_time_format(text)
+                if detected_fmt:
+                    t_fmt = detected_fmt
+                    print(f"  🔍 Auto-detected time format: \"{t_fmt}\"")
+
             predicted_dt = lookup.frame_to_datetime(fi)
-            predicted_str = predicted_dt.strftime(t_fmt)
+            display_fmt = t_fmt if t_fmt.lower() != "auto" else "%Y-%m-%d %H:%M:%S"
+            predicted_str = predicted_dt.strftime(display_fmt)
 
             # Infer day_offset from calibration data
             day_offset = 0
