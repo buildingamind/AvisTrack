@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda info:*)",
+      "Read(//c/Users/OpenChickStudio/miniconda3/envs//**)",
+      "Read(//c/Users/OpenChickStudio/anaconda3/**)",
+      "Read(//c/ProgramData/miniconda3/**)",
+      "Read(//c/ProgramData/anaconda3/**)",
+      "Read(//e/Wave2/**)",
+      "Read(//e/Wave3/**)"
+    ]
+  }
+}

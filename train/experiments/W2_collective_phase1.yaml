@@ -1,0 +1,49 @@
+# W2 Collective — Phase 1: Architecture Scan
+# ───────────────────────────────────────────
+# Goal : run 6 architectures to convergence; compare final mAP50-95 to pick
+#        the best model family and size for Phase 2.
+# Data : W2_only dataset
+# GPU  : RTX 3070 (device 0)
+# Est. : ~8-12 hr total (6 models × ~100-150 epochs each, patience stops early)
+#
+# Sequence: models run one after another automatically.
+#
+# Run:
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase1.yaml --dry-run
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase1.yaml
+
+output_root: E:/Wave2/03_Model_Training/W2_Collective/Phase1_ArchScan
+
+data: E:/Wave2/03_Model_Training/Datasets/YOLO/W2_iou096_v1/data.yaml
+
+defaults:
+  epochs:   300          # high cap; patience will stop early
+  imgsz:    640
+  batch:    16
+  device:   0
+  patience: 20
+  workers:  0            # Windows: avoid pin_memory CUDA conflict
+  exist_ok: true
+  verbose:  false
+
+runs:
+  # ── YOLOv8 ─────────────────────────────────────────────────────────────
+  - name: yolo8n
+    model: yolov8n.pt
+
+  - name: yolo8s
+    model: yolov8s.pt
+
+  # ── YOLO11 ─────────────────────────────────────────────────────────────
+  - name: yolo11n
+    model: yolo11n.pt
+
+  - name: yolo11s
+    model: yolo11s.pt
+
+  # ── YOLO26 (NMS-free, STAL small-object label assignment) ───────────────
+  - name: yolo26n
+    model: yolo26n.pt
+
+  - name: yolo26s
+    model: yolo26s.pt

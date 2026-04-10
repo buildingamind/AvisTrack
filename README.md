@@ -380,7 +380,8 @@ Then re-sample as needed — only valid time ranges will be used.
 
 ### Step 5: Train your model (outside AvisTrack)
 
-Label the sampled clips in CVAT / Roboflow / Label Studio, then train YOLO:
+Label the sampled clips in CVAT / Roboflow / Label Studio, then train YOLO.
+When importing CVAT MOT 1.1 exports back into `01_Dataset_MOT_Format/`, use the **`AvisTrack`** conda env and map each job zip to its source clip via first-frame MAE similarity (correct match ≈ 0.7 MAE; threshold 3.0). Output layout: `annotations/<clip_stem>_annotated/{gt/gt.txt, gt/labels.txt, img1/*.png}`. For project-level exports where all clips are merged into one zip, detect clip boundaries by consecutive-frame MAE spikes (threshold ≈ 7–10) then re-index frame IDs per segment.
 
 ```bash
 yolo detect train data=dataset.yaml model=yolo11n.pt epochs=100 imgsz=640

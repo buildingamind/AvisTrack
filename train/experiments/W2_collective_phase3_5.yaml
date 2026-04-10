@@ -1,0 +1,46 @@
+# W2 Collective — Phase 3.5: Model Capacity Scaling
+# ────────────────────────────────────────────────────
+# Goal : test if larger backbones can push past the yolo11s plateau (~0.576 mAP50-95).
+# Aug  : aug_minimal (Phase 3 winner: flipud=0.5, degrees=180, hsv_h=0.02, hsv_s=0.3)
+# Data : W2_combined_iou094_v1  (1637 train / 381 val — 72 clips, IoU=0.94)
+# GPU  : RTX 3070 or 8×A10 remote
+# Est. : ~10 hr on RTX 3070 (2 runs × 100 epochs, larger models ~5x slower than 11s)
+#
+# Decision rule:
+#   If yolo11l also plateaus below 0.62 mAP50-95, the 0.75 target is not achievable
+#   with the current dataset — reconsider usability threshold or annotate more data.
+#
+# Run:
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase3_5.yaml --dry-run
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase3_5.yaml
+
+output_root: E:/Wave2/03_Model_Training/W2_Collective/Phase3_5_ModelScale
+
+data: E:/Wave2/03_Model_Training/Datasets/YOLO/W2_combined_iou094_v1/data.yaml
+
+defaults:
+  epochs:   100
+  imgsz:    640
+  batch:    8    # yolo11m/11l too large for batch=16 on RTX 3070 8GB
+  patience: 20
+  device:   0
+  workers:  0
+  exist_ok: true
+  verbose:  false
+  # aug_minimal profile (Phase 3 winner)
+  flipud:   0.5
+  degrees:  180
+  hsv_h:    0.02
+  hsv_s:    0.3
+
+runs:
+  # ── yolo11s reference (Phase 3 aug_minimal result, skip if already done) ─
+  # Omitted — use Phase3_Augmentation/aug_minimal/weights/best.pt as reference.
+
+  # ── yolo11m ────────────────────────────────────────────────────────────────
+  - name: yolo11m
+    model: yolo11m.pt
+
+  # ── yolo11l ────────────────────────────────────────────────────────────────
+  - name: yolo11l
+    model: yolo11l.pt

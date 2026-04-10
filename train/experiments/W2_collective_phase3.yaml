@@ -1,0 +1,68 @@
+# W2 Collective — Phase 3: Augmentation Tuning
+# ──────────────────────────────────────────────
+# Goal : find the best augmentation profile for the fixed overhead camera.
+# Model: yolo11s.pt (COCO weights; w2_scratch strategy confirmed in Phase 2)
+# Data : W2_combined_iou094_v1  (1637 train / 381 val — 72 clips, IoU=0.94)
+#        train/annotations (50 clips) + val_tuning/annotations (22 clips)
+# GPU  : RTX 3070 or 8×A10 remote
+# Est. : ~7 hr on RTX 3070 (6 runs × 100 epochs)
+#
+# Decision rule: pick top-2 runs by mAP50-95 on val, proceed to Phase 4.
+#
+# Run:
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase3.yaml --dry-run
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase3.yaml
+
+output_root: E:/Wave2/03_Model_Training/W2_Collective/Phase3_Augmentation
+
+data: E:/Wave2/03_Model_Training/Datasets/YOLO/W2_combined_iou094_v1/data.yaml
+
+defaults:
+  model:    yolo11s.pt   # COCO init — w2_scratch strategy
+  epochs:   100
+  imgsz:    640
+  batch:    16
+  patience: 20
+  device:   0
+  workers:  0            # Windows: avoid pin_memory CUDA conflict
+  exist_ok: true
+  verbose:  false
+
+runs:
+  # ── Ultralytics defaults (baseline, no extra aug) ──────────────────────
+  - name: aug_default
+
+  # ── Overhead-optimised: full rotation + moderate scale ────────────────
+  - name: aug_overhead
+    flipud:  0.5
+    degrees: 180
+    scale:   0.3
+
+  # ── Heavy: maximum diversity ───────────────────────────────────────────
+  - name: aug_heavy
+    flipud:  0.5
+    degrees: 180
+    scale:   0.5
+    mosaic:  1.0
+    mixup:   0.1
+
+  # ── Minimal: rotation only, conservative colour jitter ─────────────────
+  - name: aug_minimal
+    flipud:  0.5
+    degrees: 180
+    hsv_h:   0.02
+    hsv_s:   0.3
+
+  # ── AdamW optimizer + overhead augmentation ────────────────────────────
+  - name: aug_adamw
+    flipud:    0.5
+    degrees:   180
+    scale:     0.3
+    optimizer: AdamW
+
+  # ── Cosine LR schedule + overhead augmentation ─────────────────────────
+  - name: aug_sgd_cos
+    flipud:  0.5
+    degrees: 180
+    scale:   0.3
+    cos_lr:  true

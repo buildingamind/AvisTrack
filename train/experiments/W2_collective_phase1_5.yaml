@@ -1,0 +1,42 @@
+# W2 Collective — Phase 1.5: Architecture Verification on Combined Data
+# ───────────────────────────────────────────────────────────────────────
+# Goal : Confirm Phase 1 ranking holds when W3 data is added.
+#        Top-3 from Phase 1 (W2-only) retested on W2+W3 combined dataset.
+#        If ranking flips, use the combined-data winner for Phase 2.
+#
+# Phase 1 W2-only results (mAP50-95):
+#   yolo11s  0.549  <- #1
+#   yolo11n  0.543  <- #2
+#   yolo26s  0.539  <- #3 (highest mAP50=0.949, worth verifying)
+#
+# Data : W2W3_combined (1198+1481 train / 297+262 val)
+# GPU  : RTX 3070 (device 0)
+# Est. : ~4-6 hr total (3 models × ~100-150 epochs each)
+#
+# Run:
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase1_5.yaml --dry-run
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase1_5.yaml
+
+output_root: E:/Wave2/03_Model_Training/W2_Collective/Phase1_5_ArchVerify
+
+data: E:/Wave2/03_Model_Training/Datasets/YOLO/W2W3_combined_iou096_092_v1/data.yaml
+
+defaults:
+  epochs:   300
+  imgsz:    640
+  batch:    16
+  device:   0
+  patience: 20
+  workers:  0
+  exist_ok: true
+  verbose:  false
+
+runs:
+  - name: yolo11s
+    model: yolo11s.pt
+
+  - name: yolo11n
+    model: yolo11n.pt
+
+  - name: yolo26s
+    model: yolo26s.pt

@@ -1,0 +1,54 @@
+# W2 Collective — Phase 2: Training Strategy
+# ────────────────────────────────────────────
+# Goal : compare scratch vs. fine-tune and data-mixing strategies.
+# Model: yolo11s (Phase 1.5 winner; ranking confirmed on combined data)
+# GPU  : RTX 3070 or 8×A10 remote (set device accordingly)
+# Est. : ~12 hr on RTX 3070; ~3 hr on 8×A10
+#
+# Decision rule: pick the top-2 runs by val F1, then proceed to Phase 3.
+#
+# Run:
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase2.yaml --dry-run
+#   python train/run_train.py --experiment train/experiments/W2_collective_phase2.yaml
+
+output_root: E:/Wave2/03_Model_Training/W2_Collective/Phase2_Strategy
+
+defaults:
+  epochs:    100
+  imgsz:     640
+  batch:     16
+  patience:  20
+  device:    0
+  workers:   0          # Windows: avoid pin_memory CUDA conflict
+  exist_ok:  true
+  verbose:   false
+
+runs:
+  # ── Baseline: train from COCO weights on W2 data only ──────────────────
+  - name: w2_scratch
+    model: yolo11s.pt   # Phase 1.5 winner
+    data: E:/Wave2/03_Model_Training/Datasets/YOLO/W2_iou096_v1/data.yaml
+
+  # ── Transfer from W3: full fine-tune ───────────────────────────────────
+  - name: w3_finetune_full
+    model: E:/Wave3/03_Model_Training/Yolo11n/Train_v1_best/weights/best.pt
+    data:  E:/Wave2/03_Model_Training/Datasets/YOLO/W2_iou096_v1/data.yaml
+    lr0:   0.001
+
+  # ── Transfer from W3: backbone frozen (first 10 layers) ────────────────
+  - name: w3_finetune_freeze
+    model:  E:/Wave3/03_Model_Training/Yolo11n/Train_v1_best/weights/best.pt
+    data:   E:/Wave2/03_Model_Training/Datasets/YOLO/W2_iou096_v1/data.yaml
+    lr0:    0.001
+    freeze: 10
+
+  # ── Combined W2+W3 data, scratch ───────────────────────────────────────
+  - name: combined_scratch
+    model: yolo11s.pt   # Phase 1.5 winner
+    data:  E:/Wave2/03_Model_Training/Datasets/YOLO/W2W3_combined_iou096_092_v1/data.yaml
+
+  # ── Combined W2+W3 data, fine-tune from W3 weights ─────────────────────
+  - name: combined_finetune
+    model: E:/Wave3/03_Model_Training/Yolo11n/Train_v1_best/weights/best.pt
+    data:  E:/Wave2/03_Model_Training/Datasets/YOLO/W2W3_combined_iou096_092_v1/data.yaml
+    lr0:   0.001
