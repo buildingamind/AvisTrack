@@ -64,6 +64,24 @@ def _track_color(tid: int) -> tuple:
 _GT_COLOR   = (100, 230, 100)   # bright green for GT
 _TRAIL_LEN  = 20
 
+# ── Count badge colors ────────────────────────────────────────────────────────
+_COLOR_OK     = "#4CAF50"   # green  — exactly 9
+_COLOR_WARN   = "#FF9800"   # orange — 8
+_COLOR_BAD    = "#f44336"   # red    — anything else
+_COLOR_DIM    = "#888888"   # grey   — secondary info
+
+
+def _count_color(n: int, target: int = 9) -> str:
+    if n == target:   return _COLOR_OK
+    if n == target-1: return _COLOR_WARN
+    return _COLOR_BAD
+
+
+def _miss_color(missing: int, total: int) -> str:
+    if missing == 0:                   return _COLOR_OK
+    if total > 0 and missing / total <= 0.10: return "#FFC107"   # yellow ≤10 %
+    return _COLOR_BAD
+
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
@@ -87,6 +105,12 @@ def load_scores(path: Path) -> dict:
         return json.load(f)
 
 
+def compute_missing(tracks: dict, n_frames: int, target: int = 9) -> int:
+    """Number of frames where detection count != target."""
+    return sum(1 for f in range(1, n_frames+1)
+               if len(tracks.get(f, [])) != target)
+
+
 # ── Frame renderer ────────────────────────────────────────────────────────────
 
 class Renderer:
@@ -94,10 +118,10 @@ class Renderer:
         self.size = panel_size
 
     def render(self, img: np.ndarray,
-               tracks: dict[int, list[tuple]],   # {frame: [(id,x1,y1,x2,y2)]}
+               tracks: dict[int, list[tuple]],
                frame_1based: int,
                show_boxes: bool, show_ids: bool,
-               show_conf: bool,                  # not used here (no conf in tracks)
+               show_conf: bool,
                show_trails: bool,
                gt_style: bool = False) -> np.ndarray:
 
@@ -130,11 +154,11 @@ class Renderer:
                 cv2.rectangle(out, (x1s,y1s), (x2s,y2s), col, 2)
                 if show_ids:
                     label = str(int(tid))
-                    (tw,th),_ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-                    bx1 = max(x1s,0); by1 = max(y1s-th-4,0)
-                    cv2.rectangle(out,(bx1,by1),(bx1+tw+4,by1+th+4),col,-1)
-                    cv2.putText(out, label, (bx1+2,by1+th+1),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,0,0), 1)
+                    (tw,th),_ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+                    bx1 = max(x1s,0); by1 = max(y1s-th-6,0)
+                    cv2.rectangle(out,(bx1,by1),(bx1+tw+6,by1+th+6),col,-1)
+                    cv2.putText(out, label, (bx1+3,by1+th+2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,0,0), 2)
 
         return out
 
@@ -161,14 +185,23 @@ class VideoPanel(QFrame):
 
         self._title = QLabel(title)
         self._title.setAlignment(Qt.AlignCenter)
-        self._title.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self._title.setStyleSheet("color:#aaa; padding:4px;")
+        self._title.setFont(QFont("Segoe UI", 13, QFont.Bold))
+        self._title.setStyleSheet("color:#bbb; padding:5px;")
+
+        # stats bar: current chick count + missing-frames count
+        self._stats = QLabel("")
+        self._stats.setAlignment(Qt.AlignCenter)
+        self._stats.setFont(QFont("Segoe UI", 11))
+        self._stats.setStyleSheet("padding: 4px 6px; background:#252525;")
+        self._stats.setTextFormat(Qt.RichText)
+        self._stats.setFixedHeight(36)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0,0,0,0)
         layout.setSpacing(0)
         layout.addWidget(self._title)
         layout.addWidget(self._label_img, stretch=1)
+        layout.addWidget(self._stats)
 
     def set_title(self, t: str):
         self._title.setText(t)
@@ -177,6 +210,21 @@ class VideoPanel(QFrame):
         self._label_img.setPixmap(
             pm.scaled(self._label_img.width(), self._label_img.height(),
                       Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def set_stats(self, current_count: int, missing_count: int,
+                  total_frames: int, target: int = 9):
+        cc = _count_color(current_count, target)
+        mc = _miss_color(missing_count, total_frames)
+
+        # current frame chick count — large & bold
+        count_html = (f'<span style="color:{cc}; font-size:17px; font-weight:bold;">'
+                      f'{current_count} chicks</span>')
+
+        # missing frames — smaller secondary info
+        miss_html  = (f'<span style="color:{mc}; font-size:13px;">'
+                      f'missing 9:&nbsp;{missing_count}/{total_frames}</span>')
+
+        self._stats.setText(f'{count_html}&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;{miss_html}')
 
 
 # ── Metrics table ─────────────────────────────────────────────────────────────
@@ -189,14 +237,15 @@ class MetricsTable(QTableWidget):
         self.setVerticalHeaderLabels(METRIC_KEYS)
         self.setHorizontalHeaderLabels(["Method A", "Method B"])
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.verticalHeader().setDefaultSectionSize(28)
+        self.verticalHeader().setDefaultSectionSize(32)
         self.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.setFixedHeight(len(METRIC_KEYS)*30 + 26)
+        self.setFixedHeight(len(METRIC_KEYS)*34 + 30)
         self.setStyleSheet("""
             QTableWidget { background:#2a2a2a; color:#ddd; gridline-color:#444;
-                           border:none; font-size:13px; }
+                           border:none; font-size:15px; }
             QHeaderView::section { background:#333; color:#aaa;
-                                   padding:4px; border:1px solid #444; }
+                                   padding:5px; border:1px solid #444;
+                                   font-size:14px; font-weight:bold; }
         """)
 
     def update_scores(self, scores_a: dict, scores_b: dict):
@@ -209,6 +258,22 @@ class MetricsTable(QTableWidget):
                     text = str(val) if val != "—" else "—"
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignCenter)
+                # Color IDSW: red if high, green if 0
+                if key == "IDSW" and isinstance(val, (int, float)):
+                    if val == 0:
+                        item.setForeground(QColor(_COLOR_OK))
+                    elif val > 100:
+                        item.setForeground(QColor(_COLOR_BAD))
+                    else:
+                        item.setForeground(QColor("#FFC107"))
+                # Color HOTA/IDF1/MOTA: green ≥0.8, orange ≥0.5, red <0.5
+                elif key in ("HOTA", "IDF1", "MOTA") and isinstance(val, float):
+                    if val >= 0.8:
+                        item.setForeground(QColor(_COLOR_OK))
+                    elif val >= 0.5:
+                        item.setForeground(QColor("#FFC107"))
+                    else:
+                        item.setForeground(QColor(_COLOR_BAD))
                 self.setItem(row, col, item)
 
 
@@ -221,7 +286,7 @@ class MainWindow(QMainWindow):
     def __init__(self, clips_dir: Path, tracks_dir: Path, scores: dict):
         super().__init__()
         self.setWindowTitle("AvisTrack — Tracking Method Comparison")
-        self.setMinimumSize(1560, 800)
+        self.setMinimumSize(1560, 860)
 
         self.clips_dir  = clips_dir
         self.tracks_dir = tracks_dir
@@ -250,6 +315,11 @@ class MainWindow(QMainWindow):
         self.show_ids    = True
         self.show_conf   = False
         self.show_trails = False
+        self._gt: dict             = {}
+        self._method_tracks: dict  = {}
+        self._gt_missing: int      = 0
+        self._missing_counts: dict = {}
+
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(1000 // self.PLAY_FPS)
         self._play_timer.timeout.connect(self._next_frame)
@@ -262,49 +332,59 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setSpacing(6); root.setContentsMargins(8,8,8,8)
+        root.setSpacing(8); root.setContentsMargins(10,10,10,10)
 
         # ── Top controls bar ──────────────────────────────────────────────────
         ctrl = QHBoxLayout()
-        ctrl.setSpacing(12)
+        ctrl.setSpacing(14)
 
-        ctrl.addWidget(QLabel("Clip:"))
+        lbl_clip = QLabel("Clip:")
+        lbl_clip.setFont(QFont("Segoe UI", 13))
+        ctrl.addWidget(lbl_clip)
+
         self.combo_clip = QComboBox()
-        # Shorten names for display
         for name in self.clip_names:
             short = name.split("_s")[0].replace("Wave2_CollectiveDanger_","") + \
                     ("_s"+name.split("_s")[-1] if "_s" in name else "")
             self.combo_clip.addItem(short, userData=name)
-        self.combo_clip.setMinimumWidth(280)
+        self.combo_clip.setMinimumWidth(300)
         ctrl.addWidget(self.combo_clip)
 
         ctrl.addWidget(_vsep())
 
-        ctrl.addWidget(QLabel("Method A:"))
+        lbl_a = QLabel("Method A:")
+        lbl_a.setFont(QFont("Segoe UI", 13))
+        ctrl.addWidget(lbl_a)
+
         self.combo_a = QComboBox()
         for m in self.methods: self.combo_a.addItem(m)
-        self.combo_a.setMinimumWidth(160)
+        self.combo_a.setMinimumWidth(180)
         ctrl.addWidget(self.combo_a)
 
-        ctrl.addWidget(QLabel("Method B:"))
+        lbl_b = QLabel("Method B:")
+        lbl_b.setFont(QFont("Segoe UI", 13))
+        ctrl.addWidget(lbl_b)
+
         self.combo_b = QComboBox()
         for m in self.methods: self.combo_b.addItem(m)
         if len(self.methods) > 1:
             self.combo_b.setCurrentIndex(1)
-        self.combo_b.setMinimumWidth(160)
+        self.combo_b.setMinimumWidth(180)
         ctrl.addWidget(self.combo_b)
 
         ctrl.addStretch()
 
-        self.lbl_frame = QLabel("Frame 0/0")
-        self.lbl_frame.setMinimumWidth(100)
+        self.lbl_frame = QLabel("Frame 0 / 0")
+        self.lbl_frame.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self.lbl_frame.setStyleSheet("color:#5a8fd8; padding: 2px 8px;")
+        self.lbl_frame.setMinimumWidth(140)
         ctrl.addWidget(self.lbl_frame)
 
         root.addLayout(ctrl)
 
         # ── Video panels ──────────────────────────────────────────────────────
         panels_row = QHBoxLayout()
-        panels_row.setSpacing(6)
+        panels_row.setSpacing(8)
 
         self.panel_gt = VideoPanel("Ground Truth")
         self.panel_a  = VideoPanel("Method A")
@@ -328,7 +408,8 @@ class MainWindow(QMainWindow):
         self.btn_next_clip = QPushButton("Next Clip ▶▶")
         for btn in (self.btn_prev_clip, self.btn_prev,
                     self.btn_play, self.btn_next, self.btn_next_clip):
-            btn.setFixedHeight(32)
+            btn.setFixedHeight(36)
+            btn.setFont(QFont("Segoe UI", 12))
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(0)
@@ -349,11 +430,12 @@ class MainWindow(QMainWindow):
         self.chk_conf   = QCheckBox("Confidence [C]")
         self.chk_trails = QCheckBox("Trails [T]")
         for chk in (self.chk_boxes, self.chk_ids, self.chk_conf, self.chk_trails):
+            chk.setFont(QFont("Segoe UI", 12))
             toggle_row.addWidget(chk)
         toggle_row.addStretch()
 
         self.lbl_status = QLabel("")
-        self.lbl_status.setStyleSheet("color:#888; font-size:11px;")
+        self.lbl_status.setStyleSheet("color:#888; font-size:12px;")
         toggle_row.addWidget(self.lbl_status)
 
         root.addLayout(toggle_row)
@@ -394,25 +476,25 @@ class MainWindow(QMainWindow):
     def _apply_dark_theme(self):
         self.setStyleSheet("""
             QMainWindow, QWidget { background:#1e1e1e; color:#ddd; }
-            QLabel { color:#ccc; font-size:12px; }
+            QLabel { color:#ccc; font-size:13px; }
             QComboBox {
                 background:#2d2d2d; color:#ddd; border:1px solid #555;
-                border-radius:3px; padding:3px 8px; font-size:12px;
+                border-radius:3px; padding:4px 10px; font-size:13px;
             }
-            QComboBox QAbstractItemView { background:#2d2d2d; color:#ddd; }
+            QComboBox QAbstractItemView { background:#2d2d2d; color:#ddd; font-size:13px; }
             QPushButton {
                 background:#3a3a3a; color:#ddd; border:1px solid #555;
-                border-radius:3px; padding:4px 12px; font-size:12px;
+                border-radius:3px; padding:5px 14px; font-size:13px;
             }
             QPushButton:hover  { background:#4a4a4a; }
             QPushButton:pressed{ background:#2a2a2a; }
-            QSlider::groove:horizontal { height:6px; background:#444; border-radius:3px; }
+            QSlider::groove:horizontal { height:7px; background:#444; border-radius:4px; }
             QSlider::handle:horizontal {
-                width:14px; height:14px; margin:-4px 0;
-                background:#5a8fd8; border-radius:7px;
+                width:16px; height:16px; margin:-5px 0;
+                background:#5a8fd8; border-radius:8px;
             }
-            QCheckBox { color:#ccc; spacing:6px; font-size:12px; }
-            QCheckBox::indicator { width:16px; height:16px; }
+            QCheckBox { color:#ccc; spacing:7px; font-size:13px; }
+            QCheckBox::indicator { width:18px; height:18px; }
         """)
 
     # ── Clip loading ──────────────────────────────────────────────────────────
@@ -439,12 +521,16 @@ class MainWindow(QMainWindow):
         # Load GT
         gt_txt = self.clips_dir/"annotations"/clip_name/"gt"/"gt.txt"
         self._gt = load_mot(gt_txt) if gt_txt.exists() else {}
+        self._gt_missing = compute_missing(self._gt, self.n_frames)
 
-        # Load method tracks (lazy-cache per clip)
+        # Load method tracks + compute missing counts
         self._method_tracks: dict[str, dict] = {}
+        self._missing_counts: dict[str, int] = {}
         for method in self.methods:
             t_path = self.tracks_dir / method / clip_name / "gt.txt"
-            self._method_tracks[method] = load_mot(t_path) if t_path.exists() else {}
+            tracks = load_mot(t_path) if t_path.exists() else {}
+            self._method_tracks[method] = tracks
+            self._missing_counts[method] = compute_missing(tracks, self.n_frames)
 
         self._update_metrics()
         self._refresh()
@@ -470,15 +556,28 @@ class MainWindow(QMainWindow):
                   show_boxes=self.show_boxes, show_ids=self.show_ids,
                   show_conf=self.show_conf,   show_trails=self.show_trails)
 
-        self.panel_gt.set_pixmap(self.renderer.to_pixmap(
-            self.renderer.render(img, self._gt,                       gt_style=True, **kw)))
-        self.panel_a.set_pixmap(self.renderer.to_pixmap(
-            self.renderer.render(img, self._get_tracks(method_a),     gt_style=False, **kw)))
-        self.panel_b.set_pixmap(self.renderer.to_pixmap(
-            self.renderer.render(img, self._get_tracks(method_b),     gt_style=False, **kw)))
+        tracks_a = self._get_tracks(method_a)
+        tracks_b = self._get_tracks(method_b)
 
+        self.panel_gt.set_pixmap(self.renderer.to_pixmap(
+            self.renderer.render(img, self._gt,    gt_style=True,  **kw)))
+        self.panel_a.set_pixmap(self.renderer.to_pixmap(
+            self.renderer.render(img, tracks_a,    gt_style=False, **kw)))
+        self.panel_b.set_pixmap(self.renderer.to_pixmap(
+            self.renderer.render(img, tracks_b,    gt_style=False, **kw)))
+
+        # Per-frame chick counts
+        gt_count = len(self._gt.get(frame_1based, []))
+        a_count  = len(tracks_a.get(frame_1based, []))
+        b_count  = len(tracks_b.get(frame_1based, []))
+
+        self.panel_gt.set_stats(gt_count, self._gt_missing,                       self.n_frames)
+        self.panel_gt.set_title("Ground Truth")
+        self.panel_a.set_stats(a_count,  self._missing_counts.get(method_a, 0),   self.n_frames)
         self.panel_a.set_title(f"Method A — {method_a}")
+        self.panel_b.set_stats(b_count,  self._missing_counts.get(method_b, 0),   self.n_frames)
         self.panel_b.set_title(f"Method B — {method_b}")
+
         self.lbl_frame.setText(f"Frame {fi+1} / {self.n_frames}")
 
         self.slider.blockSignals(True)

@@ -191,15 +191,62 @@ Final    — yolo11s + aug_minimal  (P=0.961, R=0.900, F1=0.930)
 
 ---
 
-## Next Step — Phase 4: Tracking Evaluation
+## Phase 4 — Tracking Evaluation Results
 
-The selected model feeds four tracking algorithms evaluated on a held-out test set:
+The selected W2 detector feeds four tracking algorithms evaluated on 20 held-out
+test clips (`test_golden`, 9 White Leghorn chicks per clip).
 
-| Method | Description |
-|--------|-------------|
-| `top9_hungarian` | Top-9 detections by confidence + Hungarian IoU matching |
-| `top9_kalman` | Top-9 + Kalman filter for occlusion handling |
-| `top9_interp` | Hungarian baseline + linear gap interpolation (≤ 10 frames) |
-| `bytetrack` | Ultralytics built-in ByteTrack (industry reference) |
+Primary metric: **HOTA** (balances detection and association accuracy equally).
 
-Primary metric: **HOTA** (balances detection and association accuracy).
+### Overall Scores (all 20 clips aggregated)
+
+| Method | HOTA | IDF1 | MOTA | IDSW | Notes |
+|--------|------|------|------|------|-------|
+| `bytetrack` | **0.199** | **0.819** | 0.694 | **0** | Best identity continuity |
+| `top9_kalman` | 0.172 | 0.488 | 0.854 | 765 | Best custom method |
+| `top9_hungarian` | 0.163 | 0.406 | **0.949** | 4078 | Highest recall, worst IDSW |
+| `top9_interp` | 0.163 | 0.406 | **0.949** | 4078 | Identical to hungarian† |
+
+†`top9_interp` = `top9_hungarian` because the test clips have no detection gaps
+(confidence is consistently high enough that every frame produces 9 detections,
+leaving the interpolation step with nothing to fill in).
+
+### Key Findings
+
+- **ByteTrack** dominates on identity quality: IDF1 = 0.819 vs ≤ 0.488 for custom
+  methods, and zero identity switches. Best choice for downstream behavioural analysis
+  that requires stable, long-running identities.
+- **`top9_kalman`** is the best custom method: Kalman prediction during occlusions
+  reduces IDSW from 4 078 (Hungarian) to 765.
+- **Overall HOTA is depressed by clip-boundary artefacts** — identities are forced to
+  reset at clip edges when all clips are concatenated into a single timeline for
+  global scoring. Per-clip HOTA for ByteTrack is typically 0.50–0.77, which better
+  reflects real tracking quality.
+- **MOTA trade-off:** `top9_hungarian`/`interp` force exactly 9 boxes per frame,
+  pushing recall to near-100 % and MOTA to 0.949, but at the cost of 4 078 identity
+  switches. ByteTrack's conservative association yields MOTA = 0.694 but IDSW = 0.
+
+### Selected Tracker
+
+**ByteTrack** — chosen for downstream behavioural analysis requiring long-term
+stable identities.
+
+---
+
+## W3 Model — Final Validation Results (Reference)
+
+The W3 experiment uses a separate detector trained on W3 data (darker birds,
+different arena). Included here as a reference benchmark.
+
+| Metric | W2 Model (`aug_minimal`) | W3 Model (selected) |
+|--------|--------------------------|---------------------|
+| Precision | 0.961 | **0.992** |
+| Recall | 0.900 | **0.990** |
+| mAP@50 | 0.966 | **0.994** |
+| mAP@50-95 | 0.567 | **0.774** |
+| Val images | — | 108 |
+| Val instances | — | 972 (9 chicks × 108) |
+
+The W3 model's substantially higher mAP@50-95 (0.774 vs 0.567) is consistent with
+the W3 dataset having more diverse motion (less freeze-clip duplication) and
+hand-quality annotations, raising the effective IoU ceiling that the model can reach.
