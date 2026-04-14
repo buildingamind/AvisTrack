@@ -30,3 +30,6 @@ eval/reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# verify_tracks segment cache
+tools/.verify_cache/

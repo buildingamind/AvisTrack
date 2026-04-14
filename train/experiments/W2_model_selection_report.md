@@ -233,6 +233,23 @@ stable identities.
 
 ---
 
+## Production Batch — Full Dataset Tracking (2026-04-13)
+
+All 26 raw W2 videos processed with `top9_interp` tracker.
+
+**Output**: `E:\Wave2\05_Tracking_Output\top9_interp\*.parquet` (26 files, validated)
+**Config**: `configs/w2_collective_prod.yaml` | **Script**: `cli/run_batch.py`
+
+| Recording | Notes |
+|-----------|-------|
+| `Day0_180625_2046` | Chamber setup test — only 3 birds, not an experiment day |
+| `Day1_190625_0000` | Empty chamber test — 10.45 hr file, sparse detections. Expected. |
+| `Day1_190625_1124` through `Day15` | Real experiment days — ids=9 ✓ |
+
+**Next**: downstream behavioural analysis (NNI, convex hull, CCM) on these parquets.
+
+---
+
 ## W3 Model — Final Validation Results (Reference)
 
 The W3 experiment uses a separate detector trained on W3 data (darker birds,

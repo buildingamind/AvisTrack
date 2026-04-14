@@ -395,7 +395,7 @@ Decision required — see Next Step below.
 
 ## Phase 4: Tracking Method Evaluation
 
-**Status**: READY TO RUN
+**Status**: ✓ DONE
 
 **Selected model**: `aug_minimal` (yolo11s, Phase 3 winner)
 - Path: `E:\Wave2\03_Model_Training\W2_Collective\Phase3_Augmentation\aug_minimal\weights\best.pt`
@@ -404,6 +404,19 @@ Decision required — see Next Step below.
 **Decision on mAP50-95=0.75 target**: Not achievable with current MOT tracking annotations
 (annotation box precision is the hard ceiling, not model capacity). Proceeding with
 mAP50=0.966 model which is excellent for downstream tracking (IoU≥0.5 matching).
+
+### Results
+
+| Method | HOTA | IDF1 | MOTA | IDSW |
+|--------|------|------|------|------|
+| `bytetrack` | **0.199** | **0.819** | 0.694 | **0** |
+| `top9_kalman` | 0.172 | 0.488 | 0.854 | 765 |
+| `top9_hungarian` | 0.163 | 0.406 | **0.949** | 4078 |
+| `top9_interp` | 0.163 | 0.406 | **0.949** | 4078 |
+
+**Key findings**: ByteTrack wins on identity quality (IDF1=0.819, IDSW=0). `top9_interp` ≡ `top9_hungarian` on test clips (no gaps to fill). Per-clip HOTA for ByteTrack: 0.50–0.77 (global scores depressed by clip-boundary resets).
+
+**Selected tracker for downstream analysis**: `top9_interp` (production model: `E:\Wave2\03_Model_Training\W2_Collective\top9_interp\best.pt`). ByteTrack recommended for identity-sensitive behavioural analysis (NNI).
 
 ### Tracking Methods (all use top-9 selection — 9 animals always present)
 
@@ -533,12 +546,62 @@ Phases 2 and 3 can be run on the 8×A10 remote cluster (~4× speedup).
 
 ---
 
-## Next Step
+## Phase 5: Production Batch Tracking
 
-**Phase 4 — run the eval pipeline.**
-All training is complete. Selected model: `aug_minimal` yolo11s (best P/R/F1).
-Run Steps 1–4 from the Phase 4 section above, then review the viewer to assess
-whether tracking quality is acceptable for downstream behavioural analysis.
+**Status**: ✓ DONE (2026-04-13)
 
-If HOTA for `top9_interp` is not competitive with `top9_kalman` or `bytetrack`,
-it can be dropped from the UI (viewer supports any subset via dropdown).
+All 26 raw videos processed with `top9_interp` tracker → `E:\Wave2\05_Tracking_Output\top9_interp\*.parquet`
+
+**Pipeline**: `cli/run_batch.py --config configs/w2_collective_prod.yaml`
+- Batch inference (batch_size=32) + prefetch thread for GPU utilisation
+- Checkpoint/resume: skips already-processed files automatically
+
+**Validated**: 26/26 parquets present, ids=9 for all real recordings.
+
+**Known non-experiment recordings** (expected, not bugs):
+- `Day0_180625_2046` — chamber setup test; only 3 birds visible
+- `Day1_190625_0000` — empty chamber; 10.45 hr file, sparse detections (~18k frames). Frame numbers are correct.
+
+---
+
+## Phase 6.0: Track Verification (Visual Spot-Check)
+
+**Status**: ✅ COMPLETE (2026-04-13)
+
+**Tool**: `tools/verify_tracks.py` — PyQt5 interactive viewer with segment cache
+
+```bash
+PYTHONIOENCODING=utf-8 /c/Users/OpenChickStudio/miniconda3/envs/AvisTrack/python.exe \
+    tools/verify_tracks.py \
+    --parquet-dir "E:/Wave2/05_Tracking_Output/top9_interp" \
+    --videos-dir  "E:/Wave2/00_raw_videos" \
+    --roi-file    "E:/Wave2/02_Global_Metadata/camera_rois.json"
+```
+
+**How it works**:
+- First run: extracts 5 × 150-frame segments per video (130 clips total) via ffmpeg into
+  `tools/.verify_cache/` — progress dialog, takes ~5–15 min
+- Subsequent runs: reads directly from cache — viewer opens instantly, zero seek delay
+- Cache invalidated automatically if video/parquet mtime changes
+- `R` = resample current video, `Shift+R` = resample all
+
+**Keyboard**: `←/→` frame, `Ctrl+←/→` jump 10, `↑/↓` segment, `[/]` video,
+`Space` play, `R` resample this, `Shift+R` resample all, `B/I/C/T` toggles, `Q` quit
+
+**Overlay**: 9-colour boxes + tid + conf + trail lines; N badge (green=9, orange=8, red=other)
+
+---
+
+## Phase 6.1 — Downstream Behavioural Analysis
+
+**Status**: ⏳ PENDING (after Phase 6.0 sign-off)
+
+All tracking data is ready in `E:\Wave2\05_Tracking_Output\top9_interp\`.
+
+Planned analyses:
+- **NNI (Nearest-Neighbour Index)** — spatial clustering metric per frame, per day
+- **Convex hull area** — group cohesion over time
+- **CCM (Cross-Correlation Matrix)** — inter-individual movement synchrony
+
+Use **ByteTrack** results if identity continuity is required for individual-level analysis.
+Use **top9_interp** parquets for group-level position metrics (MOTA=0.949, recall near-100%).

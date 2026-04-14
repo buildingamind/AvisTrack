@@ -1,0 +1,34 @@
+experiment: "W2_Collective_Production"
+
+drive:
+  root: "E:/Wave2"
+  raw_videos:       "{root}/00_raw_videos"
+  roi_file:         "{root}/02_Global_Metadata/camera_rois.json"
+  time_calibration: "{root}/02_Global_Metadata/time_calibration.json"
+  ocr_roi:          "{root}/02_Global_Metadata/ocr_roi.json"
+
+time:
+  timezone:    "America/New_York"
+  time_format: "auto"
+
+chamber:
+  n_subjects: 9
+  fps: 30
+  target_size: [640, 640]
+
+model:
+  backend: "yolo"
+  mode: "offline"
+  weights: "E:/Wave2/03_Model_Training/W2_Collective/top9_interp/best.pt"
+
+tracking:
+  conf_threshold: 0.25
+  max_gap_frames: 30
+
+pipeline:
+  - step: transform
+  - step: track
+
+output:
+  format: "parquet"
+  dir:    "E:/Wave2/05_Tracking_Output/top9_interp"

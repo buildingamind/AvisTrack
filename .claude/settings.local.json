@@ -7,7 +7,8 @@
       "Read(//c/ProgramData/miniconda3/**)",
       "Read(//c/ProgramData/anaconda3/**)",
       "Read(//e/Wave2/**)",
-      "Read(//e/Wave3/**)"
+      "Read(//e/Wave3/**)",
+      "Bash(PYTHONUTF8=1 /c/Users/OpenChickStudio/miniconda3/envs/AvisTrack/python.exe:*)"
     ]
   }
 }

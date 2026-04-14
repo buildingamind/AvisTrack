@@ -84,6 +84,7 @@ class YoloOfflineTracker(TrackerBackend):
         self.conf_thresh   = float(track_cfg.get("conf_threshold", 0.2))
         self.n_subjects    = int(cfg.chamber.n_subjects)
         self.max_gap       = int(track_cfg.get("max_gap_frames", 30))
+        self.batch_size    = int(track_cfg.get("batch_size", 32))
 
         # target inference size: use chamber target_size if set, else 640×640
         ts = cfg.chamber.get("target_size", [640, 640])
@@ -102,59 +103,81 @@ class YoloOfflineTracker(TrackerBackend):
         Run detection + IoU-based ID matching for one frame.
         Returns detections with stable track IDs.
         """
-        results = self._model.predict(
-            frame,
+        return self.update_batch([frame])[0]
+
+    def update_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+        """
+        Run YOLO inference on a batch of frames in one GPU call,
+        then apply sequential IoU matching per frame.
+
+        Parameters
+        ----------
+        frames : list of H×W×C BGR numpy arrays (same shape expected)
+
+        Returns
+        -------
+        list of detection lists, one per input frame
+        """
+        batch_results = self._model.predict(
+            frames,
             conf=self.conf_thresh,
             verbose=False,
             imgsz=self.imgsz,
-        )[0]
+        )
 
-        raw_boxes = results.boxes.data.cpu().numpy()
+        all_detections = []
+        for results in batch_results:
+            raw_boxes = results.boxes.data.cpu().numpy()
 
-        if len(raw_boxes) > 0:
-            # Keep at most n_subjects highest-confidence boxes
-            top = raw_boxes[np.argsort(raw_boxes[:, 4])[::-1][:self.n_subjects]]
-            curr_xyxy = top[:, :4]
-            curr_conf = top[:, 4]
-        else:
-            curr_xyxy = np.empty((0, 4))
-            curr_conf = np.empty((0,))
+            if len(raw_boxes) > 0:
+                top = raw_boxes[np.argsort(raw_boxes[:, 4])[::-1][:self.n_subjects]]
+                curr_xyxy = top[:, :4]
+                curr_conf = top[:, 4]
+            else:
+                curr_xyxy = np.empty((0, 4))
+                curr_conf = np.empty((0,))
 
-        curr_ids = self._assign_ids(curr_xyxy)
+            curr_ids = self._assign_ids(curr_xyxy)
+            self._prev_boxes = curr_xyxy.tolist()
+            self._prev_ids   = curr_ids
 
-        self._prev_boxes = curr_xyxy.tolist()
-        self._prev_ids   = curr_ids
+            detections = []
+            for i, box in enumerate(curr_xyxy):
+                x1, y1, x2, y2 = box
+                detections.append(Detection(
+                    track_id   = curr_ids[i],
+                    x          = float(x1),
+                    y          = float(y1),
+                    w          = float(x2 - x1),
+                    h          = float(y2 - y1),
+                    confidence = float(curr_conf[i]),
+                ))
+            all_detections.append(detections)
 
-        detections = []
-        for i, box in enumerate(curr_xyxy):
-            x1, y1, x2, y2 = box
-            detections.append(Detection(
-                track_id   = curr_ids[i],
-                x          = float(x1),
-                y          = float(y1),
-                w          = float(x2 - x1),
-                h          = float(y2 - y1),
-                confidence = float(curr_conf[i]),
-            ))
-        return detections
+        return all_detections
 
     def flush_interpolation(
         self,
         rows: list[tuple],
-        output_path: str,
-    ) -> None:
+    ) -> pd.DataFrame:
         """
         After processing all frames, apply per-track linear interpolation
-        and write the final result to a MOT-format CSV.
+        and return the result as a DataFrame.
 
         Parameters
         ----------
         rows : list of (frame, tid, x, y, w, h, conf, cls, vis) tuples
-        output_path : str  Path to write the final .txt / .csv
+
+        Returns
+        -------
+        pd.DataFrame with columns: frame, id, x, y, w, h, conf, class
+            Dtypes: frame=int32, id=int16, x/y/w/h/conf=float32, class=int8
         """
         if not rows:
-            logger.warning("[YoloOffline] No rows to write, skipping interpolation.")
-            return
+            logger.warning("[YoloOffline] No rows to interpolate.")
+            return pd.DataFrame(
+                columns=["frame", "id", "x", "y", "w", "h", "conf", "class"]
+            )
 
         df = pd.DataFrame(
             rows,
@@ -165,14 +188,31 @@ class YoloOfflineTracker(TrackerBackend):
         for tid, group in df.groupby("tid"):
             interpolated.append(_interpolate_track(group, max_gap=self.max_gap))
 
-        if interpolated:
-            final = (pd.concat(interpolated)
-                       .sort_values(["frame", "tid"])
-                       .assign(z=-1))
-            final.to_csv(output_path, header=False, index=False, float_format="%.2f")
-            logger.info(f"[YoloOffline] Saved interpolated result → {output_path}")
-        else:
+        if not interpolated:
             logger.warning("[YoloOffline] No tracks to interpolate.")
+            return pd.DataFrame(
+                columns=["frame", "id", "x", "y", "w", "h", "conf", "class"]
+            )
+
+        final = (pd.concat(interpolated)
+                   .sort_values(["frame", "tid"])
+                   .rename(columns={"tid": "id"})
+                   [["frame", "id", "x", "y", "w", "h", "conf", "class"]])
+
+        final = final.astype({
+            "frame": "int32",
+            "id":    "int16",
+            "x":     "float32",
+            "y":     "float32",
+            "w":     "float32",
+            "h":     "float32",
+            "conf":  "float32",
+            "class": "int8",
+        })
+
+        logger.info(f"[YoloOffline] Interpolation complete: {len(final)} rows, "
+                    f"{final['id'].nunique()} tracks")
+        return final
 
     def release(self) -> None:
         pass   # YOLO model is stateless between videos
