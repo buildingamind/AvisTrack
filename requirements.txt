@@ -17,6 +17,9 @@ torchvision
 pandas
 polars
 
+# Triage UI (tools/review_triage.py)
+flask
+
 # Optional: DLC backend
 # deeplabcut
 

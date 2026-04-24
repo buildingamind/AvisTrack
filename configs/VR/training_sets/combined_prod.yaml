@@ -1,0 +1,31 @@
+# Aggregate config for tools/aggregate_for_training.py
+# Merges annotated batches from multiple HDDs (one at a time, incremental copy)
+# into a single local SSD cache for YOLO training.
+#
+# Usage:
+#   1) Plug HDD-A:
+#        python tools/aggregate_for_training.py --config configs/VR/training_sets/combined_prod.yaml --hdd /mnt/hdd_A
+#   2) Unplug, plug HDD-B, repeat.
+#   3) When all sources collected:
+#        python tools/aggregate_for_training.py --config configs/VR/training_sets/combined_prod.yaml --finalize
+
+name: VR_combined_prod
+
+# Where the local cache lives on dev PC SSD. The tool creates
+#   <local_cache_root>/<name>/{train,val}/{images,labels}/
+local_cache_root: /home/user/avistrack_training_cache
+
+class_names:
+  - chick
+
+# What we expect to be plugged in eventually. Used to (a) decide which
+# wave dirs on each HDD to scan, (b) tell us at finalize time whether
+# everything is collected. Each wave can live on any HDD; the tool
+# matches by directory name.
+sources:
+  - wave: Wave3_prod
+    splits: [train, val]      # consumes <wave>/01_Dataset_MOT_Format/{train,val_tuning}
+    batches: all
+  - wave: Wave4_prod
+    splits: [train, val]
+    batches: all

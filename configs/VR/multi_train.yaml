@@ -1,0 +1,47 @@
+# Multi-candidate training + scoring config for train/run_multi_train.py
+#
+# Trains each candidate, evaluates all of them on the same test set,
+# and ranks by a weighted score → champion best.pt copied to <output_root>/champion/
+
+# Where per-candidate run dirs land (and where leaderboard.csv + champion/ are written)
+output_root: /mnt/hdd_A/Wave3_test/03_Model_Training
+
+# YOLO dataset.yaml produced by tools/aggregate_for_training.py --finalize
+data: /home/user/avistrack_training_cache/VR_combined_prod/dataset.yaml
+
+# AvisTrack YAML used by eval/run_eval.py — it reads test_golden clips and ROI
+# from this file. Pick whichever wave's test set is your "golden" reference.
+eval_config: configs/VR/wave3_vr.yaml
+
+# Defaults applied to every candidate unless overridden in the candidate block
+defaults:
+  epochs: 200
+  device: 0
+  patience: 20
+  exist_ok: true
+
+candidates:
+  - name: yolo11n_640
+    model: yolo11n.pt
+    imgsz: 640
+    batch: 32
+  - name: yolo11n_512
+    model: yolo11n.pt
+    imgsz: 512
+    batch: 48
+  - name: yolo11s_640
+    model: yolo11s.pt
+    imgsz: 640
+    batch: 16
+    epochs: 150         # small models need fewer epochs in practice
+
+# Weighted scoring of run_eval.py outputs.
+# Positive weight: higher is better (F1, FPS, Recall).
+# Negative weight: lower is better (ID_Switches penalty).
+# Each metric is min-max normalized across candidates before weighting,
+# so the absolute weight values are arbitrary — only their ratios matter.
+score_weights:
+  F1: 0.5
+  FPS: 0.3                 # realtime requirement → 30% of the score
+  Recall: 0.2
+  ID_Switches: -0.1
