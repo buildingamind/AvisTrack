@@ -1,0 +1,35 @@
+# =============================================================
+#  AvisTrack workspace.yaml template
+#
+#  One per chamber type. Lives at:
+#      {workspace_root}/{chamber_type}/workspace.yaml
+#
+#  Created automatically by:
+#      python tools/init_chamber_workspace.py \
+#          --workspace-root /media/ssd/avistrack \
+#          --chamber-type collective
+#
+#  Placeholders resolved by avistrack.config.load_workspace:
+#    {workspace_root} – derived from the yaml's grandparent dir
+#                       (or passed in by tools).
+#    {chamber_type}   – the chamber_type field below.
+# =============================================================
+
+chamber_type: collective                      # (required) e.g. collective | vr
+
+workspace:
+  root:        "{workspace_root}/{chamber_type}"
+  clips:       "{root}/clips"                 # immutable per-clip inventory
+  annotations: "{root}/annotations"           # YOLO txt mirroring clips/
+  manifests:   "{root}/manifests"             # all_clips.csv (lineage truth)
+  dataset:     "{root}/datasets"              # recipe-driven dataset views
+  models:      "{root}/models"                # experiments + lineage index
+
+chamber:
+  n_subjects:  9
+  fps:         30
+  target_size: [640, 640]
+
+time:
+  timezone:    "America/New_York"
+  time_format: "auto"
