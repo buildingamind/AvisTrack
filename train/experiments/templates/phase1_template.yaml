@@ -1,0 +1,45 @@
+# =============================================================
+#  Phase 1 template (workspace-aware, Step E schema)
+#
+#  Goal: architecture scan — run several model families to convergence
+#        and pick the winner for Phase 2.
+#
+#  Resolved paths (no Windows absolute paths anywhere):
+#    data    → {workspace}/{chamber_type}/datasets/{dataset_name}/data.yaml
+#    output  → {workspace}/{chamber_type}/models/{experiment_name}/phase1/
+#
+#  On first launch, run_train.py writes:
+#    {workspace}/{chamber_type}/models/{experiment_name}/meta.json
+#    {workspace}/{chamber_type}/models/{experiment_name}/snapshots/
+#  (recipe_hash + git_sha frozen for lineage tracing)
+#
+#  Run:
+#    python train/run_train.py \
+#       --experiment train/experiments/templates/phase1_template.yaml \
+#       --workspace-root /media/ssd/avistrack \
+#       --dry-run
+# =============================================================
+
+chamber_type:    collective
+workspace_yaml:  "{workspace_root}/collective/workspace.yaml"
+experiment_name: W2_collective_phase1
+dataset_name:    full_v1
+phase:           1
+
+defaults:
+  epochs:   300            # high cap; patience will stop early
+  imgsz:    640
+  batch:    16
+  device:   0
+  patience: 20
+  workers:  0              # avoid pin_memory CUDA conflict on some setups
+  exist_ok: true
+  verbose:  false
+
+runs:
+  - { name: yolo8n,  model: yolov8n.pt }
+  - { name: yolo8s,  model: yolov8s.pt }
+  - { name: yolo11n, model: yolo11n.pt }
+  - { name: yolo11s, model: yolo11s.pt }
+  - { name: yolo26n, model: yolo26n.pt }
+  - { name: yolo26s, model: yolo26s.pt }

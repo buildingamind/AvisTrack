@@ -1,0 +1,50 @@
+# =============================================================
+#  Phase 3 template (workspace-aware, Step E schema)
+#
+#  Goal: augmentation tuning of the top-2 winners from Phase 2.
+#
+#  The pipeline driver (train/run_pipeline.py) automatically inserts
+#  the Phase 2 winners into the runs list at runtime by replacing the
+#  WINNER1/WINNER2 placeholders with the actual run names. There is no
+#  longer a separate `phase3_filled.yaml` — the substitution happens
+#  in-process before run_train is invoked.
+# =============================================================
+
+chamber_type:    collective
+workspace_yaml:  "{workspace_root}/collective/workspace.yaml"
+experiment_name: W2_collective_phase1
+dataset_name:    full_v1
+phase:           3
+
+defaults:
+  epochs:   100
+  imgsz:    640
+  batch:    16
+  patience: 25
+  device:   0
+  workers:  0
+  exist_ok: true
+  verbose:  false
+
+runs:
+  # Each pair below trains the same starting weights with different
+  # augmentation knobs. WINNER1 / WINNER2 are replaced at runtime by the
+  # pipeline driver with the actual phase2 run names.
+
+  - name:  WINNER1_aug_default
+    model: phase2/WINNER1/weights/best.pt
+
+  - name:  WINNER1_aug_strong
+    model: phase2/WINNER1/weights/best.pt
+    mosaic:    1.0
+    mixup:     0.2
+    copy_paste: 0.3
+
+  - name:  WINNER2_aug_default
+    model: phase2/WINNER2/weights/best.pt
+
+  - name:  WINNER2_aug_strong
+    model: phase2/WINNER2/weights/best.pt
+    mosaic:    1.0
+    mixup:     0.2
+    copy_paste: 0.3

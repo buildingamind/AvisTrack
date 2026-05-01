@@ -572,10 +572,65 @@ def _pick_one_video(player: VideoPlayer, video_name: str,
 # ══════════════════════════════════════════════════════════════════════════
 
 def _resolve_paths(args):
-    """Resolve video_dir, roi_file from --config if not given explicitly."""
-    video_dir = getattr(args, "video_dir", None)
-    roi_file  = getattr(args, "roi_file", None)
-    config    = getattr(args, "config", None)
+    """
+    Resolve ``(video_dir, roi_file)`` from one of three input modes:
+
+    * **workspace mode** – ``--workspace-yaml --chamber-id --wave-id``
+      (preferred for the multi-chamber layout). Resolves through
+      :func:`avistrack.workspace.load_context` so legacy and structured
+      waves both land in the right place: legacy waves write
+      ``camera_rois.json`` into ``_avistrack_added/{wave_id}/``,
+      structured waves into ``02_Chamber_Metadata/``.
+    * **legacy --config** – pulls ``drive.raw_videos`` /
+      ``drive.roi_file`` out of the old single-file YAML schema.
+    * **explicit --video-dir + --roi-file** – overrides either source.
+
+    Workspace mode is selected when any of its three flags is present;
+    all three are then required.
+    """
+    video_dir      = getattr(args, "video_dir",      None)
+    roi_file       = getattr(args, "roi_file",       None)
+    config         = getattr(args, "config",         None)
+    workspace_yaml = getattr(args, "workspace_yaml", None)
+    sources_yaml   = getattr(args, "sources_yaml",   None)
+    chamber_id     = getattr(args, "chamber_id",     None)
+    wave_id        = getattr(args, "wave_id",        None)
+
+    workspace_mode = bool(workspace_yaml or chamber_id or wave_id)
+    if workspace_mode:
+        if config:
+            print("❌ --config cannot be combined with workspace-mode flags "
+                  "(--workspace-yaml / --chamber-id / --wave-id)")
+            sys.exit(1)
+        missing = [
+            name for name, val in (
+                ("--workspace-yaml", workspace_yaml),
+                ("--chamber-id",     chamber_id),
+                ("--wave-id",        wave_id),
+            ) if not val
+        ]
+        if missing:
+            print(f"❌ workspace mode requires {', '.join(missing)}")
+            sys.exit(1)
+
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from avistrack.workspace import load_context
+        workspace_yaml = Path(workspace_yaml)
+        sources_yaml = Path(sources_yaml) if sources_yaml else \
+            workspace_yaml.with_name("sources.yaml")
+        if not sources_yaml.exists():
+            print(f"❌ sources.yaml not found at {sources_yaml}")
+            sys.exit(1)
+        ctx = load_context(
+            workspace_yaml=workspace_yaml,
+            sources_yaml=sources_yaml,
+            chamber_id=chamber_id, wave_id=wave_id,
+            require_drive=True,
+        )
+        # Explicit overrides still win (handy when a user wants to
+        # validate a different roi file under the same wave).
+        return (Path(video_dir) if video_dir else ctx.wave_root,
+                Path(roi_file)  if roi_file  else ctx.roi_file)
 
     if config and (not video_dir or not roi_file):
         sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -587,9 +642,9 @@ def _resolve_paths(args):
             video_dir = cfg.drive.raw_videos
 
     if not video_dir:
-        print("❌ --video-dir or --config is required"); sys.exit(1)
+        print("❌ --video-dir, --config, or workspace-mode flags are required"); sys.exit(1)
     if not roi_file:
-        print("❌ --roi-file or --config is required"); sys.exit(1)
+        print("❌ --roi-file, --config, or workspace-mode flags are required"); sys.exit(1)
 
     return Path(video_dir), Path(roi_file)
 
@@ -735,11 +790,20 @@ def cmd_validate(args):
 def _add_pick_args(p):
     """Add pick-specific arguments to a parser."""
     p.add_argument("--config",    default=None,
-                   help="AvisTrack YAML config (auto-fills video-dir and roi-file).")
+                   help="Legacy AvisTrack YAML config (auto-fills video-dir and roi-file).")
+    p.add_argument("--workspace-yaml", default=None,
+                   help="Path to {workspace_root}/{chamber_type}/workspace.yaml "
+                        "(workspace mode — pair with --chamber-id and --wave-id).")
+    p.add_argument("--sources-yaml",   default=None,
+                   help="Path to sources.yaml (default: sibling of workspace.yaml).")
+    p.add_argument("--chamber-id",     default=None,
+                   help="Chamber id from sources.yaml (workspace mode).")
+    p.add_argument("--wave-id",        default=None,
+                   help="Wave id from sources.yaml (workspace mode).")
     p.add_argument("--video-dir", default=None,
-                   help="Directory to scan for videos (overrides config).")
+                   help="Directory to scan for videos (overrides resolved path).")
     p.add_argument("--roi-file",  default=None,
-                   help="Path to camera_rois.json (overrides config).")
+                   help="Path to camera_rois.json (overrides resolved path).")
     p.add_argument("--modality",  default="rgb",
                    choices=["rgb", "ir", "all"],
                    help="Which videos to show: rgb (default), ir, or all "
@@ -776,7 +840,15 @@ def main():
     p_val.add_argument("--video-dir", default=None,
                        help="Directory to scan for videos")
     p_val.add_argument("--config",    default=None,
-                       help="AvisTrack YAML config (auto-fills roi-file and video-dir)")
+                       help="Legacy AvisTrack YAML config (auto-fills roi-file and video-dir)")
+    p_val.add_argument("--workspace-yaml", default=None,
+                       help="Workspace yaml (paired with --chamber-id / --wave-id).")
+    p_val.add_argument("--sources-yaml",   default=None,
+                       help="Path to sources.yaml (default: sibling of workspace.yaml).")
+    p_val.add_argument("--chamber-id",     default=None,
+                       help="Chamber id from sources.yaml (workspace mode).")
+    p_val.add_argument("--wave-id",        default=None,
+                       help="Wave id from sources.yaml (workspace mode).")
     p_val.add_argument("--modality",  default="rgb", choices=["rgb", "ir"],
                        help="Filter videos by modality keyword (default: rgb)")
 

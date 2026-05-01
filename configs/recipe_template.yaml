@@ -1,0 +1,60 @@
+# =============================================================
+#  AvisTrack dataset recipe.yaml template
+#
+#  A recipe describes how to assemble a YOLO-format dataset view
+#  from the workspace's clips/ + frames/ + annotations/ inventory.
+#
+#  Used by:
+#      python tools/build_dataset.py \
+#          --workspace-yaml /media/ssd/avistrack/collective/workspace.yaml \
+#          --recipe         path/to/this_file.yaml
+#
+#  The build tool produces:
+#      {workspace}/datasets/{name}/
+#          recipe.yaml      ← this file, copied verbatim
+#          manifest.csv     ← which (clip, frame, split) tuples got picked
+#          data.yaml        ← Ultralytics-format pointer
+#          images/{train,val,test}/  ← symlinks into ../../frames/
+#          labels/{train,val,test}/  ← symlinks into ../../annotations/
+#
+#  Datasets are immutable once built. Want a different mix? Write a
+#  new recipe with a different `name:` and run build_dataset again –
+#  the two datasets coexist under datasets/.
+# =============================================================
+
+name:         full_v1                 # dataset directory name (no spaces)
+chamber_type: collective              # must match workspace.yaml
+
+# ─── Filter: which clips from manifests/all_clips.csv are eligible ───
+include:
+  chambers: ["*"]                     # "*" or list, e.g. [collective_104A]
+  waves:    ["*"]                     # "*" or list, e.g. [wave2]
+  layouts:  ["*"]                     # "*" or list of [structured, legacy]
+
+# Optional blacklist applied after include filter.
+exclude:
+  source_videos: []                   # basenames to skip, e.g. [Day1_RGB.mkv]
+  clip_paths:    []                   # exact clip_path values from all_clips.csv
+
+# Only consider clips that have been annotated (annotations/.../{stem}/ exists
+# and contains at least one .txt). Set to false to include unannotated clips
+# – useful for inference-only dataset builds.
+require_annotations: true
+
+# ─── Train / val / test split ──────────────────────────────────────
+split:
+  ratios:
+    train: 0.80
+    val:   0.10
+    test:  0.10
+  # Stratification key. Frames are grouped by this key before splitting,
+  # so the resulting splits are balanced across the chosen dimension.
+  #   chamber – every chamber appears in every split
+  #   wave    – every wave appears in every split
+  #   clip    – every clip appears in every split (frame-level split)
+  #   none    – pure random over frames
+  stratify: chamber
+  seed:     42
+
+# YOLO data.yaml fields.
+classes: ["chick"]                    # list of class names; index = class id

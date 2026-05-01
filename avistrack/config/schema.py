@@ -99,6 +99,7 @@ class WorkspaceLayout(BaseModel):
     """Resolved paths inside a single chamber-type workspace."""
     root:        str
     clips:       Optional[str] = None
+    frames:      Optional[str] = None   # extracted PNG frames per clip
     annotations: Optional[str] = None
     manifests:   Optional[str] = None
     dataset:     Optional[str] = None   # dataset views built from clips+annotations
@@ -177,3 +178,159 @@ class SourcesConfig(BaseModel):
             if c.chamber_id == chamber_id:
                 return c
         raise KeyError(f"chamber_id {chamber_id!r} not registered in sources.yaml")
+
+
+# ── Dataset recipe schema ────────────────────────────────────────────────
+
+class RecipeInclude(BaseModel):
+    chambers: list[str] = ["*"]
+    waves:    list[str] = ["*"]
+    layouts:  list[str] = ["*"]
+
+    model_config = {"extra": "allow"}
+
+
+class RecipeExclude(BaseModel):
+    source_videos: list[str] = []
+    clip_paths:    list[str] = []
+
+    model_config = {"extra": "allow"}
+
+
+class RecipeSplit(BaseModel):
+    ratios:    dict[str, float] = {"train": 0.8, "val": 0.1, "test": 0.1}
+    stratify:  str = "chamber"   # chamber | wave | clip | none
+    seed:      int = 42
+
+    model_config = {"extra": "allow"}
+
+    @field_validator("stratify")
+    @classmethod
+    def _check_stratify(cls, v: str) -> str:
+        if v not in {"chamber", "wave", "clip", "none"}:
+            raise ValueError(
+                f"split.stratify must be one of chamber|wave|clip|none, got {v!r}"
+            )
+        return v
+
+    @field_validator("ratios")
+    @classmethod
+    def _check_ratios(cls, v: dict[str, float]) -> dict[str, float]:
+        if not v:
+            raise ValueError("split.ratios must not be empty")
+        bad = [k for k in v if k not in {"train", "val", "test"}]
+        if bad:
+            raise ValueError(f"split.ratios keys must be train|val|test, got {bad!r}")
+        if any(r < 0 for r in v.values()):
+            raise ValueError(f"split.ratios values must be ≥ 0, got {v!r}")
+        s = sum(v.values())
+        if s <= 0:
+            raise ValueError(f"split.ratios sum must be > 0, got {v!r}")
+        return v
+
+
+class RecipeConfig(BaseModel):
+    """
+    Dataset recipe – describes how to assemble one immutable
+    ``datasets/{name}/`` view from a workspace.
+    """
+    name:         str
+    chamber_type: str
+    include:      RecipeInclude  = RecipeInclude()
+    exclude:      RecipeExclude  = RecipeExclude()
+    require_annotations: bool    = True
+    split:        RecipeSplit    = RecipeSplit()
+    classes:      list[str]      = ["chick"]
+
+    model_config = {"extra": "allow"}
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        if not v or any(c.isspace() for c in v) or "/" in v or "\\" in v:
+            raise ValueError(
+                f"recipe name must be a non-empty path-safe identifier, got {v!r}"
+            )
+        return v
+
+
+# ── Experiment config (workspace-aware training) ─────────────────────────
+
+class TrainingDefaults(BaseModel):
+    """Training kwargs applied to every run unless overridden."""
+    epochs:   int = 300
+    imgsz:    int = 640
+    batch:    int = 16
+    device:   Any = 0
+    patience: int = 20
+    workers:  int = 0
+    exist_ok: bool = True
+    verbose:  bool = False
+
+    model_config = {"extra": "allow"}
+
+
+class TrainingRun(BaseModel):
+    """One training run inside an experiment.
+
+    ``model`` is one of:
+      * ultralytics registry name (``yolov8n.pt``, ``yolo11n.pt``)
+      * workspace-relative path inside the current experiment
+        (``phase1/yolo8n/weights/best.pt``) — resolved against
+        ``{workspace}/models/{experiment_name}/``
+      * absolute path
+    """
+    name:  str
+    model: str
+
+    model_config = {"extra": "allow"}   # transparent passthrough for lr0, etc.
+
+
+class ExperimentConfig(BaseModel):
+    """
+    Workspace-aware experiment yaml. Lives at e.g.
+    ``train/experiments/W2_collective_phase1_v2.yaml`` and is loaded by
+    :func:`avistrack.config.loader.load_experiment`.
+
+    The runner derives all output paths from these fields:
+
+    * ``data_yaml``  → ``{workspace}/datasets/{dataset_name}/data.yaml``
+    * ``exp_dir``    → ``{workspace}/models/{experiment_name}/``
+    * ``phase_dir``  → ``{exp_dir}/phase{phase}/``
+    """
+    chamber_type:    str
+    workspace_yaml:  str
+    experiment_name: str
+    dataset_name:    str
+    phase:           int
+    defaults:        TrainingDefaults = TrainingDefaults()
+    runs:            list[TrainingRun]
+
+    model_config = {"extra": "allow"}
+
+    @field_validator("phase")
+    @classmethod
+    def _check_phase(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"phase must be ≥ 1, got {v!r}")
+        return v
+
+    @field_validator("experiment_name")
+    @classmethod
+    def _check_experiment_name(cls, v: str) -> str:
+        if not v or any(c.isspace() for c in v) or "/" in v or "\\" in v:
+            raise ValueError(
+                f"experiment_name must be a non-empty path-safe identifier, got {v!r}"
+            )
+        return v
+
+    @field_validator("runs")
+    @classmethod
+    def _check_runs_nonempty(cls, v: list[TrainingRun]) -> list[TrainingRun]:
+        if not v:
+            raise ValueError("experiment must define at least one run")
+        names = [r.name for r in v]
+        if len(set(names)) != len(names):
+            dups = [n for n in names if names.count(n) > 1]
+            raise ValueError(f"duplicate run names in experiment: {sorted(set(dups))!r}")
+        return v

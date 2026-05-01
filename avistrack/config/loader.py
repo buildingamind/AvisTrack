@@ -25,6 +25,8 @@ import yaml
 from avistrack.config.drive_probe import probe_drive_mount
 from avistrack.config.schema import (
     AvisTrackConfig,
+    ExperimentConfig,
+    RecipeConfig,
     SourcesConfig,
     WorkspaceConfig,
 )
@@ -144,6 +146,52 @@ def load_sources(
             _resolve_inplace(wave, replacements)
 
     return SourcesConfig.model_validate(raw)
+
+
+# ── Recipe config ────────────────────────────────────────────────────────
+
+def load_experiment(
+    path: str | Path,
+    workspace_root: Optional[str | Path] = None,
+) -> ExperimentConfig:
+    """
+    Load a workspace-aware training experiment yaml.
+
+    Resolves ``{workspace_root}`` in the ``workspace_yaml`` field so that
+    ``train/run_train.py`` can hand the caller a fully-qualified path
+    without the user having to bake the workspace location into the
+    experiment yaml.
+
+    ``workspace_root`` may be passed in (e.g. by tests) or supplied via
+    the ``AVISTRACK_WORKSPACE_ROOT`` environment variable; if neither is
+    provided and the field still contains ``{workspace_root}`` after
+    parsing, validation fails so the user sees a clear error rather than
+    a confusing path-not-found later.
+    """
+    raw = _read_yaml(path)
+
+    if workspace_root is None:
+        import os
+        env = os.environ.get("AVISTRACK_WORKSPACE_ROOT")
+        if env:
+            workspace_root = env
+
+    if workspace_root is not None:
+        raw = _resolve_placeholders(raw, {"workspace_root": str(workspace_root)})
+
+    return ExperimentConfig.model_validate(raw)
+
+
+def load_recipe(path: str | Path) -> RecipeConfig:
+    """
+    Load and validate a dataset recipe.yaml.
+
+    Recipes do not contain placeholders (their job is to describe a
+    selection over the workspace inventory, not file paths), so this
+    loader is a thin schema-validating wrapper.
+    """
+    raw = _read_yaml(path)
+    return RecipeConfig.model_validate(raw)
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────

@@ -20,7 +20,8 @@ chamber_type: collective                      # (required) e.g. collective | vr
 workspace:
   root:        "{workspace_root}/{chamber_type}"
   clips:       "{root}/clips"                 # immutable per-clip inventory
-  annotations: "{root}/annotations"           # YOLO txt mirroring clips/
+  frames:      "{root}/frames"                # extracted PNG frames per clip
+  annotations: "{root}/annotations"           # YOLO txt mirroring frames/
   manifests:   "{root}/manifests"             # all_clips.csv (lineage truth)
   dataset:     "{root}/datasets"              # recipe-driven dataset views
   models:      "{root}/models"                # experiments + lineage index

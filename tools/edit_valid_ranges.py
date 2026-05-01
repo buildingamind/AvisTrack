@@ -44,6 +44,70 @@ from avistrack.core.time_lookup import TimeLookup
 DT_FMT = "%Y-%m-%d %H:%M:%S"
 DT_SHORT = "%Y-%m-%d %H:%M"
 
+
+def _resolve_paths(args) -> tuple[Path, Path, str]:
+    """
+    Resolve ``(time_calibration_path, valid_ranges_path, timezone)``.
+
+    Two input modes:
+
+    * **workspace mode** – ``--workspace-yaml --chamber-id --wave-id``
+      uses :func:`avistrack.workspace.load_context`. Legacy waves get
+      their valid_ranges.json under ``_avistrack_added/{wave_id}/``;
+      structured waves under ``02_Chamber_Metadata/``. The timezone
+      comes from ``workspace.yaml``'s ``time.timezone``.
+    * **legacy --config** – pulls the same fields out of the old
+      single-file YAML.
+
+    Workspace mode is selected when any of its three flags is present;
+    all three are then required.
+    """
+    workspace_yaml = getattr(args, "workspace_yaml", None)
+    sources_yaml   = getattr(args, "sources_yaml",   None)
+    chamber_id     = getattr(args, "chamber_id",     None)
+    wave_id        = getattr(args, "wave_id",        None)
+    config         = getattr(args, "config",         None)
+
+    workspace_mode = bool(workspace_yaml or chamber_id or wave_id)
+    if workspace_mode:
+        if config:
+            print("❌ --config cannot be combined with workspace-mode flags "
+                  "(--workspace-yaml / --chamber-id / --wave-id)")
+            sys.exit(1)
+        missing = [
+            name for name, val in (
+                ("--workspace-yaml", workspace_yaml),
+                ("--chamber-id",     chamber_id),
+                ("--wave-id",        wave_id),
+            ) if not val
+        ]
+        if missing:
+            print(f"❌ workspace mode requires {', '.join(missing)}")
+            sys.exit(1)
+
+        from avistrack.workspace import load_context
+        workspace_yaml = Path(workspace_yaml)
+        sources_yaml = Path(sources_yaml) if sources_yaml else \
+            workspace_yaml.with_name("sources.yaml")
+        if not sources_yaml.exists():
+            print(f"❌ sources.yaml not found at {sources_yaml}")
+            sys.exit(1)
+        ctx = load_context(
+            workspace_yaml=workspace_yaml,
+            sources_yaml=sources_yaml,
+            chamber_id=chamber_id, wave_id=wave_id,
+            require_drive=True,
+        )
+        return (ctx.time_calibration_file,
+                ctx.valid_ranges_file,
+                ctx.workspace.time.timezone)
+
+    if not config:
+        print("❌ --config or workspace-mode flags are required")
+        sys.exit(1)
+    cfg = load_config(config)
+    return Path(cfg.drive.time_calibration), Path(cfg.drive.valid_ranges), cfg.time.timezone
+
 # Formats accepted for user input (tried in order)
 _INPUT_FMTS = [
     "%Y-%m-%d %H:%M:%S",
@@ -110,11 +174,8 @@ def get_video_spans(calibration: dict, tz_str: str) -> dict:
 # ── Subcommand: add ──────────────────────────────────────────────────────
 
 def cmd_add(args):
-    cfg = load_config(args.config)
-    cal_path = Path(cfg.drive.time_calibration)
-    vr_path  = Path(cfg.drive.valid_ranges)
-    tz_str   = cfg.time.timezone
-    tz       = ZoneInfo(tz_str)
+    cal_path, vr_path, tz_str = _resolve_paths(args)
+    tz = ZoneInfo(tz_str)
 
     if not cal_path.exists():
         print(f"❌ time_calibration.json not found: {cal_path}")
@@ -204,8 +265,7 @@ def cmd_add(args):
 # ── Subcommand: list ─────────────────────────────────────────────────────
 
 def cmd_list(args):
-    cfg = load_config(args.config)
-    vr_path = Path(cfg.drive.valid_ranges)
+    _, vr_path, _ = _resolve_paths(args)
 
     if not vr_path.exists():
         print(f"ℹ️  No valid_ranges.json found at {vr_path}")
@@ -235,8 +295,7 @@ def cmd_list(args):
 # ── Subcommand: remove ───────────────────────────────────────────────────
 
 def cmd_remove(args):
-    cfg = load_config(args.config)
-    vr_path = Path(cfg.drive.valid_ranges)
+    _, vr_path, _ = _resolve_paths(args)
 
     if not vr_path.exists():
         print("ℹ️  No valid_ranges.json found.")
@@ -291,6 +350,25 @@ def cmd_remove(args):
 
 # ── Entry point ──────────────────────────────────────────────────────────
 
+def _add_resolve_args(p, *, config_required: bool) -> None:
+    """Wire up the path-resolution flags shared by every subcommand."""
+    # config is mutually exclusive with workspace-mode flags but argparse
+    # doesn't model that cleanly across subcommands; _resolve_paths
+    # validates the combination at runtime instead.
+    p.add_argument("--config", default=None,
+                   required=config_required,
+                   help="Legacy AvisTrack YAML config")
+    p.add_argument("--workspace-yaml", default=None,
+                   help="Path to {workspace_root}/{chamber_type}/workspace.yaml "
+                        "(workspace mode — pair with --chamber-id and --wave-id).")
+    p.add_argument("--sources-yaml",   default=None,
+                   help="Path to sources.yaml (default: sibling of workspace.yaml).")
+    p.add_argument("--chamber-id",     default=None,
+                   help="Chamber id from sources.yaml (workspace mode).")
+    p.add_argument("--wave-id",        default=None,
+                   help="Wave id from sources.yaml (workspace mode).")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Record valid time ranges per video.")
@@ -302,17 +380,17 @@ def main():
         ("remove", "Remove valid ranges"),
     ]:
         p = sub.add_parser(name, help=helptext)
-        p.add_argument("--config", required=True,
-                        help="AvisTrack YAML config")
+        _add_resolve_args(p, config_required=False)
 
-    # Allow `--config` at top level → defaults to 'add'
-    parser.add_argument("--config", default=None,
-                        help="AvisTrack YAML config (implies 'add' subcommand)")
+    # Top-level mirrors so `python edit_valid_ranges.py --config X` (or the
+    # workspace-mode equivalent) defaults to the 'add' subcommand.
+    _add_resolve_args(parser, config_required=False)
 
     args = parser.parse_args()
 
     if not args.cmd:
-        if args.config:
+        has_workspace = bool(args.workspace_yaml or args.chamber_id or args.wave_id)
+        if args.config or has_workspace:
             args.cmd = "add"
         else:
             parser.print_help()

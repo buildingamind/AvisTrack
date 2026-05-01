@@ -2,26 +2,41 @@
 """
 eval/run_eval.py
 ────────────────
-Run multiple model weights on the test-set clips and output a side-by-side
-performance report.
+Two-mode evaluator.
 
-Usage
------
+**Mode A** (legacy clip-MOT tracking eval) — unchanged from before Step E.
+Runs multiple weights against per-clip MOT-format ground truth and
+reports Precision / Recall / F1 / ID-switches / FPS::
+
     python eval/run_eval.py \\
         --config  configs/wave3_collective.yaml \\
         --weights /media/.../weights/v1.pt /media/.../weights/v2.pt \\
         --output  eval/reports/wave3_coll_$(date +%Y%m%d).csv
 
-What it measures (per weight file)
------------------------------------
+**Mode B** (workspace-aware YOLO val) — added in Step E. Reads the
+experiment's ``meta.json`` to find the dataset, runs ultralytics
+``model.val()`` against ``datasets/{name}/data.yaml``, aggregates by
+clip via ``manifest.csv``, and writes lineage-tagged outputs to
+``models/{exp}/eval/{dataset_name}/``::
+
+    python eval/run_eval.py \\
+        --workspace-yaml /media/wkspc/collective/workspace.yaml \\
+        --experiment-name W2_collective_phase1
+        # weights default to {exp}/final/best.pt
+        # dataset_name defaults to whatever meta.json says
+
+Modes are mutually exclusive — pick one.
+
+Mode A internals
+----------------
     Precision   TP / (TP + FP)
     Recall      TP / (TP + FN)
     F1          harmonic mean
     ID-switches Number of times a track ID changes on the same animal
     Throughput  Average FPS on this machine
 
-Ground-truth format
--------------------
+Ground-truth format (mode A only)
+---------------------------------
 For each test clip  <clip>.mp4  there must be a matching  <clip>.txt  in the
 same folder, in MOT format (headerless):
     frame, id, x, y, w, h, conf, class, vis[, ext]
@@ -35,13 +50,11 @@ import sys
 import time
 from pathlib import Path
 
-import cv2
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from avistrack.config.loader import load_config
-from avistrack.core.transformer import PerspectiveTransformer
+from avistrack import lineage as L
+from avistrack.config.loader import load_config, load_workspace
 
 
 # ── IoU helper ────────────────────────────────────────────────────────────
@@ -66,8 +79,10 @@ def run_clip(clip_path: Path, weights: str, cfg) -> list[dict]:
     Run a single weights file on a single clip.
     Returns a list of per-frame dicts: {frame, id, x, y, w, h, conf}
     """
+    import cv2
     from ultralytics import YOLO
     from avistrack.backends.yolo.offline import YoloOfflineTracker
+    from avistrack.core.transformer import PerspectiveTransformer
 
     # Temporarily override weights in a shallow copy of config
     class _Cfg:
@@ -159,6 +174,7 @@ def evaluate(preds: list[dict], gt: dict[int, list[dict]], iou_thresh: float = 0
     """
     Per-frame Hungarian matching → aggregate TP/FP/FN and ID switches.
     """
+    from scipy.optimize import linear_sum_assignment
     tp = fp = fn = id_switches = 0
     prev_match: dict[int, int] = {}   # gt_id → pred_id from previous frame
 
@@ -224,28 +240,21 @@ def evaluate(preds: list[dict], gt: dict[int, list[dict]], iou_thresh: float = 0
     }
 
 
-# ── Main ──────────────────────────────────────────────────────────────────
+# ── Mode A: legacy clip-MOT tracking eval ────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate multiple YOLO weights on test clips.")
-    parser.add_argument("--config",  required=True)
-    parser.add_argument("--weights", nargs="+", required=True, help="One or more .pt paths.")
-    parser.add_argument("--output",  default="eval/reports/eval_result.csv")
-    parser.add_argument("--iou-threshold", type=float, default=0.5)
-    args = parser.parse_args()
-
+def run_mode_a(args) -> int:
     cfg = load_config(args.config)
     dataset_dir = cfg.drive.dataset
     if not dataset_dir:
         print("❌ drive.dataset not set in config.")
-        sys.exit(1)
+        return 1
 
     test_dir = Path(dataset_dir) / "test_golden"
     clips    = sorted(test_dir.glob("*.mp4"))
 
     if not clips:
         print(f"❌ No .mp4 clips found in {test_dir}")
-        sys.exit(1)
+        return 1
 
     print(f"📋 {len(clips)} test clips  ×  {len(args.weights)} weight files\n")
 
@@ -306,6 +315,215 @@ def main():
         writer.writerows(report_rows)
 
     print(f"📊 Report saved → {out}")
+    return 0
+
+
+# ── Mode B: workspace-aware YOLO val ─────────────────────────────────────
+
+def _resolve_workspace_yaml(workspace_yaml: str, workspace_root) -> Path:
+    if "{workspace_root}" in workspace_yaml:
+        if workspace_root is None:
+            raise SystemExit(
+                "workspace_yaml has '{workspace_root}'; pass --workspace-root."
+            )
+        workspace_yaml = workspace_yaml.replace("{workspace_root}", str(workspace_root))
+    return Path(workspace_yaml).expanduser().resolve()
+
+
+def aggregate_per_clip(manifest_csv: Path, split: str = "test") -> list[dict]:
+    """Group manifest rows by ``clip_stem`` for the requested split.
+
+    Returns one row per clip with frame counts and chamber/wave provenance.
+    Real per-clip mAP would require ultralytics-side bookkeeping that
+    isn't exposed cleanly today; this is the lineage-friendly proxy.
+    """
+    if not manifest_csv.exists():
+        return []
+    by_clip: dict[str, dict] = {}
+    with open(manifest_csv, newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("split") != split:
+                continue
+            stem = row.get("clip_stem", "")
+            if not stem:
+                continue
+            entry = by_clip.setdefault(stem, {
+                "clip_stem":  stem,
+                "chamber_id": row.get("chamber_id", ""),
+                "wave_id":    row.get("wave_id", ""),
+                "split":      split,
+                "n_frames":   0,
+            })
+            entry["n_frames"] += 1
+    return sorted(by_clip.values(), key=lambda r: r["clip_stem"])
+
+
+def run_mode_b(args) -> int:
+    import yaml as _yaml
+
+    workspace_yaml = _resolve_workspace_yaml(
+        args.workspace_yaml, args.workspace_root
+    )
+    if not workspace_yaml.exists():
+        raise SystemExit(f"workspace yaml not found: {workspace_yaml}")
+    workspace = load_workspace(workspace_yaml)
+
+    models_root = Path(workspace.workspace.models)
+    exp_dir = models_root / args.experiment_name
+    if not (exp_dir / "meta.json").exists():
+        raise SystemExit(
+            f"meta.json not found at {exp_dir}. Run training first or check "
+            f"--experiment-name."
+        )
+    meta = L.read_meta(exp_dir)
+
+    dataset_name = args.dataset_name or meta.dataset_name
+    datasets_root = Path(workspace.workspace.dataset)
+    dataset_dir = datasets_root / dataset_name
+    data_yaml = dataset_dir / "data.yaml"
+    if not data_yaml.exists():
+        raise SystemExit(f"dataset data.yaml not found: {data_yaml}")
+
+    if args.weights:
+        if len(args.weights) != 1:
+            raise SystemExit(
+                "mode B accepts at most one --weights value. "
+                "(Pass none to default to {exp}/final/best.pt.)"
+            )
+        weights = Path(args.weights[0]).expanduser().resolve()
+    else:
+        weights = exp_dir / "final" / "best.pt"
+        if not weights.exists():
+            raise SystemExit(
+                f"default weights {weights} not found. Either finish "
+                f"training or pass --weights."
+            )
+
+    out_dir = exp_dir / "eval" / dataset_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"📋 Workspace eval")
+    print(f"   experiment   : {args.experiment_name}")
+    print(f"   dataset      : {dataset_name}")
+    print(f"   data.yaml    : {data_yaml}")
+    print(f"   weights      : {weights}")
+    print(f"   output       : {out_dir}")
+    print()
+
+    # Lazy import: ultralytics is heavy and not needed for mode A or for
+    # tests that only exercise the path-resolution / aggregation helpers.
+    from ultralytics import YOLO
+
+    model = YOLO(str(weights))
+    results = model.val(
+        data=str(data_yaml), split=args.split,
+        imgsz=args.imgsz, batch=args.batch, device=args.device,
+        save_json=False, verbose=True,
+    )
+
+    # ultralytics 8.x: results.box.{map,map50,mp,mr}
+    box = getattr(results, "box", None)
+    summary = {
+        "experiment_name": args.experiment_name,
+        "dataset_name":    dataset_name,
+        "split":           args.split,
+        "weights":         str(weights),
+        "mAP50-95":        float(getattr(box, "map",   0.0)) if box else 0.0,
+        "mAP50":           float(getattr(box, "map50", 0.0)) if box else 0.0,
+        "precision":       float(getattr(box, "mp",    0.0)) if box else 0.0,
+        "recall":          float(getattr(box, "mr",    0.0)) if box else 0.0,
+    }
+    p, r = summary["precision"], summary["recall"]
+    summary["F1"] = (2 * p * r / (p + r)) if (p + r) > 0 else 0.0
+
+    summary_csv = out_dir / "summary.csv"
+    with open(summary_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(summary.keys()))
+        w.writeheader()
+        w.writerow(summary)
+
+    per_clip_csv = out_dir / "per_clip_results.csv"
+    rows = aggregate_per_clip(dataset_dir / "manifest.csv", split=args.split)
+    if rows:
+        with open(per_clip_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+
+    eval_cfg = out_dir / "eval_config.yaml"
+    eval_cfg.write_text(_yaml.safe_dump({
+        "experiment_name": args.experiment_name,
+        "dataset_name":    dataset_name,
+        "split":           args.split,
+        "weights":         str(weights),
+        "git_sha":         L.git_sha(),
+        "git_dirty":       L.git_dirty(),
+        "started_at":      L.now_iso(),
+        "data_yaml":       str(data_yaml),
+    }, sort_keys=False))
+
+    print(f"\n✅ Eval done.")
+    print(f"   {summary_csv}")
+    if rows:
+        print(f"   {per_clip_csv}  ({len(rows)} clips)")
+    print(f"   {eval_cfg}")
+    return 0
+
+
+# ── Main ──────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Evaluate YOLO weights — legacy clip-MOT (mode A) "
+                    "or workspace-aware YOLO val (mode B).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Mode A
+    parser.add_argument("--config", default=None,
+                        help="[mode A] Legacy AvisTrack config yaml.")
+    parser.add_argument("--weights", nargs="+", default=None,
+                        help="[mode A] One or more .pt paths. "
+                             "[mode B] Optional override (default: {exp}/final/best.pt).")
+    parser.add_argument("--output", default="eval/reports/eval_result.csv",
+                        help="[mode A] CSV report path.")
+    parser.add_argument("--iou-threshold", type=float, default=0.5,
+                        help="[mode A] IoU threshold for matching.")
+    # Mode B
+    parser.add_argument("--workspace-yaml", default=None,
+                        help="[mode B] Path (or {workspace_root} placeholder) to workspace.yaml.")
+    parser.add_argument("--workspace-root", default=None,
+                        help="[mode B] Resolves {workspace_root} in --workspace-yaml.")
+    parser.add_argument("--experiment-name", default=None,
+                        help="[mode B] Experiment to evaluate.")
+    parser.add_argument("--dataset-name", default=None,
+                        help="[mode B] Override the dataset (defaults to meta.json).")
+    parser.add_argument("--split", default="test",
+                        help="[mode B] Dataset split to evaluate (default: test).")
+    parser.add_argument("--imgsz", type=int, default=640,
+                        help="[mode B] Image size for ultralytics val.")
+    parser.add_argument("--batch", type=int, default=16,
+                        help="[mode B] Batch size for ultralytics val.")
+    parser.add_argument("--device", default=0,
+                        help="[mode B] Device passed to ultralytics val.")
+    args = parser.parse_args()
+
+    mode_a = bool(args.config)
+    mode_b = bool(args.workspace_yaml or args.experiment_name)
+    if mode_a and mode_b:
+        parser.error("--config (mode A) is mutually exclusive with "
+                     "--workspace-yaml/--experiment-name (mode B).")
+    if not mode_a and not mode_b:
+        parser.error("Pass either --config (mode A) or --workspace-yaml + "
+                     "--experiment-name (mode B).")
+
+    if mode_a:
+        if not args.weights:
+            parser.error("mode A requires --weights.")
+        sys.exit(run_mode_a(args))
+    else:
+        if not (args.workspace_yaml and args.experiment_name):
+            parser.error("mode B requires --workspace-yaml and --experiment-name.")
+        sys.exit(run_mode_b(args))
 
 
 if __name__ == "__main__":
