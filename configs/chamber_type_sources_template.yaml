@@ -1,0 +1,46 @@
+# =============================================================
+#  AvisTrack sources.yaml template
+#
+#  Registers every chamber drive that feeds one chamber-type workspace.
+#  Lives at:
+#      {workspace_root}/{chamber_type}/sources.yaml
+#
+#  Each chamber drive carries an _avistrack_source.yaml at its root that
+#  pins it to a chamber_id; the drive_uuid here is the filesystem volume
+#  serial / UUID, used by avistrack.config.drive_probe.probe_drive_mount
+#  to bind chamber_root -> the current mount point at load time.
+#
+#  Mark a wave as layout: legacy when it predates the structured layout
+#  (no 02_Chamber_Metadata folder, free-form video locations). Legacy
+#  metadata lives under {chamber_root}/_avistrack_added/{wave_id}/ and
+#  is populated by tools/scan_legacy_wave.py + pick_rois --legacy.
+# =============================================================
+
+chamber_type: collective
+
+chambers:
+  - chamber_id:  collective_104A
+    drive_uuid:  "ABCD-1234"                    # Win: VolumeSerialNumber  Linux: blkid UUID
+    drive_label: "104-A"
+    waves:
+      - wave_id: wave2
+        layout: structured
+        wave_subpath: "Wave2"
+        raw_videos_subpath: "{wave_subpath}/00_raw_videos"
+        metadata_subpath:   "{wave_subpath}/02_Chamber_Metadata"
+
+      - wave_id: wave1_legacy
+        layout: legacy
+        wave_subpath: "Wave1_OldDump"
+        raw_videos_glob:  "**/*.mp4"
+        metadata_subpath: "_avistrack_added/wave1_legacy"
+
+  # - chamber_id:  collective_104B
+  #   drive_uuid:  "EF01-5678"
+  #   drive_label: "104-B"
+  #   waves:
+  #     - wave_id: wave3
+  #       layout: structured
+  #       wave_subpath: "Wave3"
+  #       raw_videos_subpath: "{wave_subpath}/00_raw_videos"
+  #       metadata_subpath:   "{wave_subpath}/02_Chamber_Metadata"
