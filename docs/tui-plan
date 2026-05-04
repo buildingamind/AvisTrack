@@ -1,0 +1,333 @@
+
+  ---
+  AvisTrack 采样流程详解（TUI 参考版）
+
+  ---
+  架构概述
+
+  中央 workspace SSD (F:\BAM\avistrack_workspace\vr\)
+  ├── workspace.yaml          # chamber_type, target_size, fps 等
+  ├── sources.yaml            # 所有 chamber drive 的注册表 + waves
+  ├── clips/{chamber}/{wave}/ # 采样出来的 .mp4
+  ├── frames/{chamber}/{wave}/ # 提取的 PNG（flat，无子目录）
+  ├── annotations/{chamber}/{wave}/  # CVAT 导入的 txt
+  ├── manifests/
+  │   ├── all_clips.csv       # 全局 clip 清单（唯一来源）
+  │   └── triage/{batch_id}.csv
+  ├── datasets/{name}/        # recipe 驱动的视图
+  └── models/{exp}/
+
+  chamber drive (E:\, G:\, ...)
+  ├── _avistrack_source.yaml  # 驱动器标识文件（注册时写入）
+  ├── Wave3_1/
+  │   ├── 00_raw_videos/RGB/  # 原始 .mkv
+  │   └── 02_Global_Metadata/
+  │       ├── camera_rois.json
+  │       ├── valid_ranges.json   # 可选，需要 time_calibration
+  │       └── time_calibration.json
+  └── ...
+
+  关键原则：
+  - workspace 必须在 git repo 之外（loader 会校验，报错 if .git in parents）
+  - drive 通过 volume serial UUID 识别，与挂载盘符无关
+  - drive 离线时 chamber_root = None → drive_online = False，访问任何 drive-side 路径抛 DriveOfflineError
+  - all_clips.csv append-only，唯一的 clip 来源，永远不覆盖
+
+  ---
+  Step 0：workspace 初始化（每个 chamber_type 只做一次）
+
+  python tools/init_chamber_workspace.py \
+      --workspace-root F:/BAM/avistrack_workspace \
+      --chamber-type vr
+
+  产物：workspace.yaml + 6 个空目录（clips/ frames/ annotations/ manifests/ datasets/ models/）
+
+  注意：workspace_root 不能在 git 目录内。
+
+  ---
+  Step 1：注册新 chamber drive
+
+  代码：register_chamber_source.py
+
+  # 非交互模式（推荐）
+  python tools/register_chamber_source.py \
+      --workspace-root F:/BAM/avistrack_workspace \
+      --chamber-type vr \
+      --chamber-id vr_106B \
+      --mount G:/ \
+      --drive-uuid XXXX-YYYY   # 可选，自动探测
+
+  # 交互模式（不传 --mount，程序列出所有挂载卷让你选）
+  python tools/register_chamber_source.py \
+      --workspace-root F:/BAM/avistrack_workspace \
+      --chamber-type vr \
+      --chamber-id vr_106B
+
+  内部逻辑：
+  1. 写 G:\_avistrack_source.yaml（含 chamber_id, drive_uuid, 注册时间）
+  2. upsert sources.yaml：若 chamber_id 已存在则刷新 UUID，保留已有的 waves
+
+  幂等性：同一 chamber_id 重复跑 = 更新 UUID/label，不破坏 waves
+
+  冲突保护：drive 上已有 _avistrack_source.yaml 且 chamber_id 不一致 → 报错退出，除非加 --force
+
+  之后：sources.yaml 里该 chamber 的 waves: [] 是空的，需要手动编辑添加 wave 条目（或 scan_legacy_wave.py 处理老布局）
+
+  Wave 条目格式（结构化布局）：
+  - wave_id: wave3_1
+    layout: structured
+    wave_subpath: Wave3_1            # 仅用于 ctx.wave_root（不是视频路径的 base）
+    raw_videos_subpath: Wave3_1/00_raw_videos/RGB   # 相对于 chamber_root
+    metadata_subpath: Wave3_1/02_Global_Metadata    # 相对于 chamber_root
+
+  Wave 条目格式（legacy 布局）：
+  - wave_id: wave2
+    layout: legacy
+    wave_subpath: Wave2/IndividualDanger
+    raw_videos_glob: "**/*.mkv"       # 相对于 wave_root
+    metadata_subpath: Wave2/02_Global_Metadata
+
+  ---
+  Step 2：ROI picking
+
+  代码：pick_rois.py
+
+  python tools/pick_rois.py \
+      --workspace-yaml F:/BAM/avistrack_workspace/vr/workspace.yaml \
+      --chamber-id vr_106B --wave-id wave3_1 \
+      --modality rgb
+
+  内部逻辑：
+  - workspace mode 解析 ctx.wave_root（chamber_root / wave_subpath）作为视频搜索根
+  - modality 过滤："RGB" or "IR" in filename stem（大小写无关）；"all" = RGB 先 IR 后
+  - 增量保存：每确认一个视频立即写 camera_rois.json，下次打开已有角点
+  - 角点携带：新视频没有 ROI 时，自动用上一个视频的角点作为初始值（减少重复点击）
+
+  键位：
+
+  ┌───────────────────┬───────────────────────────────────────┐
+  │        键         │                 动作                  │
+  ├───────────────────┼───────────────────────────────────────┤
+  │ 左键单击          │ 放置角点（顺序：左上→右上→右下→左下） │
+  ├───────────────────┼───────────────────────────────────────┤
+  │ Z / Ctrl+Z        │ 撤销上一个角点                        │
+  ├───────────────────┼───────────────────────────────────────┤
+  │ R                 │ 重置全部角点                          │
+  ├───────────────────┼───────────────────────────────────────┤
+  │ N                 │ 随机跳到另一帧                        │
+  ├───────────────────┼───────────────────────────────────────┤
+  │ S / Enter / → / D │ 保存 + 下一个视频                     │
+  ├───────────────────┼───────────────────────────────────────┤
+  │ ← / A             │ 返回上一个视频                        │
+  ├───────────────────┼───────────────────────────────────────┤
+  │ Q / Esc           │ 退出                                  │
+  └───────────────────┴───────────────────────────────────────┘
+
+  Validate 子命令：
+  python tools/pick_rois.py validate \
+      --workspace-yaml ... --chamber-id ... --wave-id ... --modality rgb
+  检查：文件存在、合法 JSON、每 entry 4 个 [x,y] 点、所有视频有 entry（全名或 stem 匹配）
+
+  已知 bug：validate 在该 wave 对应 modality 有 0 个视频时 crash（exit non-zero with empty input）→ wave3_1 跑 --modality ir
+  时会死
+
+  ---
+  Step 3：采样 clips
+
+  代码：sample_clips.py
+
+  python tools/sample_clips.py \
+      --workspace-yaml F:/BAM/avistrack_workspace/vr/workspace.yaml \
+      --chamber-id vr_106B --wave-id wave3_1 \
+      --n 30 --duration 3 --modality rgb --min-gap 5
+
+  参数：
+
+  ┌────────────────┬───────┬──────────────────────────────────────┐
+  │      参数      │ 默认  │                 说明                 │
+  ├────────────────┼───────┼──────────────────────────────────────┤
+  │ --n            │ 20    │ 本次新增 clip 数                     │
+  ├────────────────┼───────┼──────────────────────────────────────┤
+  │ --duration     │ 3.0   │ 每个 clip 秒数                       │
+  ├────────────────┼───────┼──────────────────────────────────────┤
+  │ --min-gap      │ 5.0   │ 同源视频相邻 clip 的最小间隔（分钟） │
+  ├────────────────┼───────┼──────────────────────────────────────┤
+  │ --modality     │ rgb   │ rgb / ir                             │
+  ├────────────────┼───────┼──────────────────────────────────────┤
+  │ --seed         │ 42    │ 随机种子                             │
+  ├────────────────┼───────┼──────────────────────────────────────┤
+  │ --no-transform │ False │ 跳过 ROI 透视变换                    │
+  └────────────────┴───────┴──────────────────────────────────────┘
+
+  内部逻辑：
+  1. 取当前 wave 下所有 modality 视频 → probe fps/帧数
+  2. 排除太短的（< duration + 10s，默认 < 13s）
+  3. 按帧数加权随机采样：长视频被采到的概率更高
+  4. 读 all_clips.csv 里同 chamber+wave 的已有记录，计算已占用的时间段
+  5. 对每个候选时间点：检查 min_gap（和已有 + 本次新增的都检查）
+  6. 若有 valid_ranges.json（时间段限制）：必须同时存在 time_calibration.json，否则报错退出
+  7. 随机开始时间在 [5s, video_end - duration - 5s] 范围内
+  8. 最多尝试 n × 100 次，不够则 warn 并用实际采到的数量
+  9. Append 到 all_clips.csv（不覆盖，幂等追加）
+
+  clip 文件名格式：
+  {chamber_id}_{wave_id}_{video_stem}_s{int(start_sec)}_transformed.mp4
+  （_transformed suffix 在有 ROI 时加）
+
+  关键边界情况：
+  - drive 离线 → DriveOfflineError（require_drive=True）
+  - ROI 缺失（validate 失败）→ 报错 + 打印 pick_rois 命令，退出
+  - 视频全都太短 → SystemExit: No videos long enough
+  - min_gap 过大 + 视频太短 → attempts 耗尽，warn 后返回 0
+  - 同 drive 第二次 sample：已采区间从 all_clips.csv 读回来，min_gap 跨 session 生效
+
+  ---
+  Step 4：提取帧
+
+  代码：extract_frames.py
+
+  python tools/extract_frames.py \
+      --workspace-yaml F:/BAM/avistrack_workspace/vr/workspace.yaml \
+      --chamber-id vr_106B --wave-id wave3_1 \
+      --target-frames 100 \
+      --hash-threshold 1
+
+  参数：
+
+  ┌───────────────────┬──────────────────┬────────────────────────────────────────┐
+  │       参数        │       默认       │                  说明                  │
+  ├───────────────────┼──────────────────┼────────────────────────────────────────┤
+  │ --target-frames   │ None（disabled） │ 精确 final 帧数                        │
+  ├───────────────────┼──────────────────┼────────────────────────────────────────┤
+  │ --frames-per-clip │ 5                │ 有 target-frames 时被 auto 覆盖        │
+  ├───────────────────┼──────────────────┼────────────────────────────────────────┤
+  │ --hash-threshold  │ 5                │ dHash Hamming 距离阈值；0 = 关闭 dedup │
+  ├───────────────────┼──────────────────┼────────────────────────────────────────┤
+  │ --seed            │ 42               │ target-frames 随机砍帧的种子           │
+  └───────────────────┴──────────────────┴────────────────────────────────────────┘
+
+  target-frames 模式（推荐）：
+  - effective_fpc = max(frames_per_clip, ceil(target * 3 / n_clips))（3x headroom）
+  - Phase 1: 所有 clips × effective_fpc 均匀帧 → candidates（全部读入内存）
+  - Phase 2: 全局 dHash dedup（threshold > 0），first-seen wins
+  - Phase 3: 若 kept > target → random.Random(seed).sample(kept, target) 再按 clip/frame_idx 排序；若 kept < target → warn +
+  用全部
+  - Phase 4: 写 PNG + manifest
+
+  dHash 适用性（VR 场景）：
+  - threshold=5：VR 静态场景几乎全灭（上例砍 92%）
+  - threshold=1：保留约 60-70%
+  - threshold=0：关闭 dedup，完全手动（triage 时看）
+  - VR 小鸡检测建议：1 或 0，因为同 clip 内的微小姿态差对训练有价值
+
+  输出：
+  - PNGs → frames/{chamber_id}/{wave_id}/{clip_stem}_f{idx:06d}.png（flat，无子目录）
+  - Manifest → manifests/triage/{batch_id}.csv
+  - batch_id = {chamber}_{wave}_{YYYY-MM-DD}_batch{NN}，同一天 batch01, batch02...
+
+  drive 依赖：extract_frames 用 require_drive=False，drive 离线也能跑（clips 已在 workspace）
+
+  ---
+  Step 5：人工 triage
+
+  代码：review_triage.py
+
+  python tools/review_triage.py \
+      --workspace-yaml F:/BAM/avistrack_workspace/vr/workspace.yaml \
+      --chamber-id vr_106B --wave-id wave3_1 \
+      --batch vr_106B_wave3_1_2026-05-02_batch01
+
+  键位：
+
+  ┌───────┬───────────────────────┐
+  │  键   │         动作          │
+  ├───────┼───────────────────────┤
+  │ a / ← │ reject（标红）        │
+  ├───────┼───────────────────────┤
+  │ d / → │ approve（标绿）       │
+  ├───────┼───────────────────────┤
+  │ b     │ 上一张                │
+  ├───────┼───────────────────────┤
+  │ n     │ 下一张                │
+  ├───────┼───────────────────────┤
+  │ space │ 跳到下一个 pending    │
+  ├───────┼───────────────────────┤
+  │ z     │ 撤销上一步            │
+  ├───────┼───────────────────────┤
+  │ q     │ 退出（自动 finalize） │
+  └───────┴───────────────────────┘
+
+  Auto-finalize：退出时自动把所有 Triage_Status: rejected 的 PNG 移到 frames/{chamber}/{wave}/_rejected/，manifest 中保持
+  rejected 状态。幂等（已移动的不会重复处理）。
+
+  Manifest 状态：pending → approved / rejected。all_clips.csv 不受影响。
+
+  ---
+  Step 6 以后（CVAT → import → dataset → train）
+
+  # 上传 frames/{chamber}/{wave}/*.png 到 CVAT 标注
+  # 导出 YOLO txt 格式 zip
+
+  python tools/import_annotations.py \
+      --workspace-yaml ... --cvat-export ./export.zip
+
+  # 写 recipe.yaml，build_dataset, 然后 experiment.yaml 跑训练
+
+  ---
+  TUI 需要处理的完整状态机
+
+  [选 workspace] → [选/注册 chamber] → [选/添加 wave]
+        ↓
+  [Drive 是否在线?]
+    离线 → 只能进 extract/triage/build_dataset 流程
+    在线 → 完整流程
+
+  [ROI 是否完整?]
+    不完整 → 跳到 pick_rois（必须 GUI，cv2 窗口）
+    完整 → 继续
+
+  [sample_clips]
+    ↓ 成功 → N clips appended
+    ↓ 0 clips (视频太短/min_gap 太大) → 警告 + 提示调参
+
+  [extract_frames]
+    ↓ target-frames 达到 → triage
+    ↓ pool < target (dedup 太狠) → 提示: 降 threshold 或多采 clips
+
+  [review_triage]
+    ↓ 完成 → approved frames 可以上传 CVAT
+
+  [import_annotations → build_dataset → train]
+
+  ---
+  常见边界情况汇总
+
+  ┌────────────────────────────────────┬──────────────────────────────┬───────────────────────────────┐
+  │                情况                │             触发             │             处理              │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ drive 离线时跑 sample_clips        │ DriveOfflineError            │ 提示插盘                      │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ drive 离线时跑 extract_frames      │ 正常（require_drive=False）  │ OK                            │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ ROI 文件不存在                     │ validate_roi_file 返回 False │ 提示先跑 pick_rois            │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ wave 有 0 个视频（如 wave3_1 IR）  │ pick_rois validate crash     │ 跳过该 modality               │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ 视频全部太短（< 13s for 3s clips） │ sample_clips SystemExit      │ 提示换 wave 或降 duration     │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ min_gap 太大导致 attempts 耗尽     │ warn + 返回实际数量          │ 提示降 min_gap 或减少 n       │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ target-frames pool < N             │ warn 打印                    │ 提示降 threshold 或多采 clips │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ 同 drive 多次 sample               │ min_gap 跨 session 生效      │ 自动（all_clips.csv 记录）    │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ workspace 在 git repo 内           │ load_workspace 报错          │ 换路径                        │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ drive marker 指向不同 chamber_id   │ register 报错                │ 加 --force 或确认错误         │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ batch_id 重复（同天重跑）          │ derive_batch_id 自动递增     │ auto NN: batch01→batch02      │
+  ├────────────────────────────────────┼──────────────────────────────┼───────────────────────────────┤
+  │ PIL 未安装                         │ pick_rois 降级到 cv2 panel   │ 功能不变，界面差一些          │
+  └────────────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
+
+✻ Crunched for 5m 15s
