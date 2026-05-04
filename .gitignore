@@ -10,6 +10,11 @@ build/
 # Data (actual files live on external drive / NAS)
 # Only configs and manifests pointing to data are tracked in git
 data/
+datasets/
+
+# Training outputs (Ultralytics + W&B local cache)
+runs/
+wandb/
 
 # Eval reports output
 eval/reports/
@@ -18,6 +23,12 @@ eval/reports/
 *.pt
 *.pth
 *.onnx
+*.engine
+
+# Training video clips (kept on T7-Lab; never in repo)
+*.mp4
+*.avi
+*.mov
 
 # Jupyter
 .ipynb_checkpoints/
