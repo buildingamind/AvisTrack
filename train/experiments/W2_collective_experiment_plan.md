@@ -1,5 +1,9 @@
 # Collective Chamber W2 — YOLO Model Training Experiment Plan
 
+> **STATUS: COMPLETE 2026-04-13 — archived as historical work log.**
+> All phases shipped; production batch tracking finished. Kept for
+> reproducibility and decision provenance, not as active work.
+
 ## Objective
 
 Train and select the best YOLO detection model for the **Wave 2 Collective Chamber** experiment.
@@ -541,8 +545,8 @@ Phases 2 and 3 can be run on the 8×A10 remote cluster (~4× speedup).
 | Tool | Purpose | Status |
 |------|---------|--------|
 | `tools/curate_frames.py` | Frame dedup + YOLO dataset export (IoU & displacement methods) | Done |
-| `train/run_train.py` | Batch training runner (skip completed, dry-run, --eval) | TODO |
-| `eval/run_eval.py` | Final test-set evaluation | TODO |
+| `train/run_train.py` | Batch training runner (skip completed, dry-run, --eval) | Done |
+| `eval/run_eval.py` | Final test-set evaluation | Done |
 
 ---
 
