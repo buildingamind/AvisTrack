@@ -165,6 +165,31 @@ class TimeLookup:
         return cls(np.array(frames), np.array(unix_times), tz, fps)
 
     @classmethod
+    def from_segment_start(
+        cls,
+        start_unix: float,
+        fps: float,
+        n_frames: int,
+        timezone_str: str = "America/New_York",
+    ) -> "TimeLookup":
+        """Build a lookup for a constant-fps segment from its wall-clock start.
+
+        ChamberBroadcaster records the wall-clock ``unix_s`` at which each
+        recording segment opens (a ``new_segment`` event in
+        ``timestamp_calibration.jsonl``). Combined with the segment's frame
+        rate and length this gives an exact linear frame->unix mapping without
+        a separate OCR ``time_calibration.json``.
+
+        ``fps`` must be the SAME rate used to turn a clip's ``start_sec`` into a
+        frame index (the video's own CAP_PROP_FPS), so the two cancel and the
+        mapping is exact regardless of nominal-vs-true fps.
+        """
+        last = max(int(n_frames) - 1, 1)
+        frames = np.array([0, last])
+        unix_times = np.array([start_unix, start_unix + last / float(fps)])
+        return cls(frames, unix_times, ZoneInfo(timezone_str), float(fps))
+
+    @classmethod
     def load(
         cls,
         calibration_path: str | Path,
@@ -181,3 +206,34 @@ class TimeLookup:
             f"TimeLookup(frames={self.start_frame}–{self.end_frame}, "
             f"samples={self.n_samples}, fps_nom={self.fps_nominal})"
         )
+
+
+# ── ChamberBroadcaster capture log ─────────────────────────────────────────
+
+def load_segment_starts(jsonl_path: str | Path) -> dict[str, float]:
+    """Parse ChamberBroadcaster ``timestamp_calibration.jsonl`` and return
+    ``{video_basename: segment_start_unix}`` from its ``new_segment`` events.
+
+    The ``FRAGMENTED_`` capture prefix is stripped so keys match the remuxed
+    (clean) filenames used downstream. First event per file wins (a segment
+    opens once). Malformed / blank lines are skipped.
+    """
+    starts: dict[str, float] = {}
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("reason") != "new_segment":
+                continue
+            vf, u = ev.get("video_file"), ev.get("unix_s")
+            if not vf or u is None:
+                continue
+            if vf.startswith("FRAGMENTED_"):
+                vf = vf[len("FRAGMENTED_"):]
+            starts.setdefault(vf, float(u))
+    return starts

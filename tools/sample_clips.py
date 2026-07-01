@@ -49,7 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from avistrack.core.time_lookup import TimeLookup
+from avistrack.core.time_lookup import TimeLookup, load_segment_starts
 from avistrack.core.transformer import PerspectiveTransformer
 from avistrack.core import rois as roi_utils
 from avistrack.workspace import ChamberWaveContext, load_context
@@ -324,21 +324,37 @@ def sample_clips(
     lookups: dict[str, TimeLookup] = {}
     valid_ranges_raw = load_valid_ranges(ctx.valid_ranges_file)
     if valid_ranges_raw:
-        cal_path = ctx.time_calibration_file
-        if not cal_path.exists():
-            raise SystemExit(
-                f"valid_ranges.json exists at {ctx.valid_ranges_file} but "
-                f"time_calibration.json not found at {cal_path}. Run "
-                f"`tools/calibrate_time.py calibrate` first."
-            )
-        with open(cal_path) as f:
-            calibration = json.load(f)
         tz_str = ctx.workspace.time.timezone
         tz = ZoneInfo(tz_str)
-        for vname in valid_ranges_raw:
-            if vname in calibration:
-                lookups[vname] = TimeLookup.from_calibration(
-                    calibration, vname, tz_str)
+        info_by_name = {v.name: info for v, info in video_info.items()}
+        ts_path = ctx.timestamp_calibration_file      # ChamberBroadcaster log
+        cal_path = ctx.time_calibration_file          # legacy OCR table
+        # Prefer the capture log (always written before recording); the OCR
+        # time_calibration.json is a legacy fallback for pre-broadcaster waves.
+        if ts_path.exists():
+            starts = load_segment_starts(ts_path)
+            for vname in valid_ranges_raw:
+                info = info_by_name.get(vname)
+                if vname in starts and info:
+                    lookups[vname] = TimeLookup.from_segment_start(
+                        starts[vname], info["fps"], info["n_frames"], tz_str)
+            print(f"⏱️  Time source: {ts_path.name} "
+                  f"({len(starts)} segment start(s)).")
+        elif cal_path.exists():
+            with open(cal_path) as f:
+                calibration = json.load(f)
+            for vname in valid_ranges_raw:
+                if vname in calibration:
+                    lookups[vname] = TimeLookup.from_calibration(
+                        calibration, vname, tz_str)
+            print(f"⏱️  Time source: {cal_path.name} (legacy OCR).")
+        else:
+            raise SystemExit(
+                f"valid_ranges.json exists at {ctx.valid_ranges_file} but no "
+                f"time source found. Expected {ts_path.name} (ChamberBroadcaster "
+                f"capture log) or {cal_path.name} (tools/calibrate_time.py) "
+                f"in {ctx.metadata_dir}."
+            )
         parsed_ranges = _parse_ranges(valid_ranges_raw, tz)
 
         n_ranges = sum(len(v) for v in valid_ranges_raw.values())

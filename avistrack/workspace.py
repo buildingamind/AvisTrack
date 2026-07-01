@@ -159,7 +159,16 @@ class ChamberWaveContext:
 
     @property
     def time_calibration_file(self) -> Path:
+        """Legacy OCR frame<->time table (tools/calibrate_time.py). Fallback
+        only — new data derives time from timestamp_calibration.jsonl."""
         return self.metadata_dir / "time_calibration.json"
+
+    @property
+    def timestamp_calibration_file(self) -> Path:
+        """ChamberBroadcaster's capture-time timestamp log (jsonl). Preferred
+        source for frame<->wall-clock mapping over the legacy OCR
+        time_calibration.json (see tools/sample_clips.py)."""
+        return self.metadata_dir / "timestamp_calibration.jsonl"
 
     @property
     def ocr_roi_file(self) -> Path:
