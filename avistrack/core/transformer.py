@@ -21,7 +21,6 @@ If no target_size is given, the output is sized to preserve the original
 aspect ratio of the ROI (same behaviour as ChamberBroadcaster's CropProcessor).
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -64,31 +63,29 @@ class PerspectiveTransformer:
         target_size: Optional[tuple[int, int]] = None,
     ) -> "PerspectiveTransformer":
         """
-        Load corners for a specific video from a camera_rois.json file.
+        Load corners for a specific video from a corner file.
+
+        Accepts either the new ``chamber_corners.json`` (ChamberBroadcaster)
+        or the legacy flat ``camera_rois.json``; the format is auto-detected
+        (see :mod:`avistrack.core.rois`).
 
         Parameters
         ----------
-        roi_file   : path to camera_rois.json
-        video_name : the key inside the JSON (basename of the video file)
+        roi_file   : path to chamber_corners.json or camera_rois.json
+        video_name : basename of the video file to resolve corners for
         target_size: optional fixed output size
         """
+        from avistrack.core.rois import corners_from_file
+
         path = Path(roi_file)
         if not path.exists():
             raise FileNotFoundError(f"ROI file not found: {roi_file}")
 
-        with open(path) as f:
-            rois = json.load(f)
+        corners = corners_from_file(path, video_name)
+        if corners is None:
+            raise KeyError(f"No ROI entry for '{video_name}' in {roi_file}.")
 
-        # Allow lookup by full path or basename
-        key = video_name if video_name in rois else Path(video_name).name
-        if key not in rois:
-            raise KeyError(
-                f"No ROI entry for '{video_name}' in {roi_file}. "
-                f"Available keys: {list(rois.keys())[:5]} ..."
-            )
-
-        corners = rois[key]
-        logger.info(f"[Transformer] Loaded ROI for '{key}' from {roi_file}")
+        logger.info(f"[Transformer] Loaded ROI for '{video_name}' from {roi_file}")
         return cls(corners, target_size)
 
     # ── Public API ───────────────────────────────────────────────────────

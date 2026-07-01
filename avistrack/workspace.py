@@ -130,7 +130,28 @@ class ChamberWaveContext:
 
     @property
     def roi_file(self) -> Path:
+        """Legacy per-video ROI file (camera_rois.json).
+
+        Kept for the manual ``pick_rois`` workflow and pre-ChamberBroadcaster
+        waves. New data prefers ``chamber_corners.json`` — read corners via
+        :meth:`resolve_corners` / :attr:`corners_source` rather than this path.
+        """
         return self.metadata_dir / "camera_rois.json"
+
+    @property
+    def corners_source(self) -> Optional[Path]:
+        """The corner file that will actually be read, preferring the new
+        ``chamber_corners.json`` over the legacy ``camera_rois.json``. ``None``
+        if neither exists on the drive."""
+        from avistrack.core.rois import preferred_roi_file
+        return preferred_roi_file(self.metadata_dir)
+
+    def resolve_corners(self, video_name: str) -> Optional[list]:
+        """Resolve 4 perspective corners for ``video_name`` from this wave's
+        metadata, preferring ``chamber_corners.json`` and falling back to
+        ``camera_rois.json`` (see :mod:`avistrack.core.rois`)."""
+        from avistrack.core.rois import resolve_corners
+        return resolve_corners(self.metadata_dir, video_name)
 
     @property
     def valid_ranges_file(self) -> Path:

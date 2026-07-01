@@ -302,7 +302,9 @@ def take_snapshot(
     diff = git_uncommitted_diff(repo_root)
     diff_path = snap / "uncommitted.diff"
     if diff:
-        diff_path.write_text(diff)
+        # utf-8 (not the platform default, e.g. cp1252 on Windows) — diffs of
+        # source routinely contain non-ASCII (this repo uses ✅/─ etc.).
+        diff_path.write_text(diff, encoding="utf-8")
     else:
         # Wipe a stale diff if previous run was dirty and current is clean.
         if diff_path.exists():

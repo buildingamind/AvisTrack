@@ -51,8 +51,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from avistrack.core.time_lookup import TimeLookup
 from avistrack.core.transformer import PerspectiveTransformer
+from avistrack.core import rois as roi_utils
 from avistrack.workspace import ChamberWaveContext, load_context
-from tools.pick_rois import validate_roi_file
 
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov"}
@@ -149,23 +149,6 @@ def too_close(new_start: float, new_end: float,
         if new_start < (e + min_gap_sec) and new_end > (s - min_gap_sec):
             return True
     return False
-
-
-# ── ROI helpers ───────────────────────────────────────────────────────────
-
-def load_roi_json(roi_path: Path) -> dict:
-    with open(roi_path) as f:
-        return json.load(f)
-
-
-def find_roi_for_video(rois: dict, video_name: str) -> Optional[list]:
-    if video_name in rois:
-        return rois[video_name]
-    stem = Path(video_name).stem
-    for key, corners in rois.items():
-        if Path(key).stem == stem:
-            return corners
-    return None
 
 
 # ── Valid range filtering ────────────────────────────────────────────────
@@ -296,22 +279,21 @@ def sample_clips(
     print(f"📹 Found {len(all_videos)} {modality.upper()} video(s) on "
           f"chamber drive {ctx.chamber.chamber_id} (wave {ctx.wave.wave_id}).")
 
-    # ── 2. ROI validation (unless --no-transform) ────────────────────
-    rois: dict = {}
+    # ── 2. Corner validation (unless --no-transform) ─────────────────
     if not no_transform:
-        roi_path = ctx.roi_file
-        ok, msgs = validate_roi_file(str(roi_path), [v.name for v in all_videos])
+        ok, msgs = roi_utils.validate_corners(
+            ctx.metadata_dir, [v.name for v in all_videos])
         for m in msgs:
             print(f"  {m}")
         if not ok:
             print()
-            print("   Pick missing ROIs with:")
+            print("   New data carries corners in chamber_corners.json (picked")
+            print("   at capture). For legacy data, pick them with:")
             print(f"     python tools/pick_rois.py pick \\")
             print(f"         --video-dir {ctx.wave_root} \\")
-            print(f"         --roi-file  {roi_path}")
+            print(f"         --roi-file  {ctx.roi_file}")
             print("   Or pass --no-transform to skip perspective-correction.")
             raise SystemExit(1)
-        rois = load_roi_json(roi_path)
 
     target_size = (tuple(ctx.workspace.chamber.target_size)
                    if ctx.workspace.chamber.target_size else None)
@@ -370,9 +352,9 @@ def sample_clips(
 
     # ── 6. Pre-build transformers (one per video) ────────────────────
     transformers: dict[str, PerspectiveTransformer] = {}
-    if rois:
+    if not no_transform:
         for v in pool_videos:
-            corners = find_roi_for_video(rois, v.name)
+            corners = roi_utils.resolve_corners(ctx.metadata_dir, v.name)
             if corners:
                 transformers[v.name] = PerspectiveTransformer(corners, target_size)
 
@@ -403,16 +385,16 @@ def sample_clips(
                                   info["fps"], lookups, parsed_ranges):
                 continue
 
+        tf = transformers.get(video.name)
         clip_name = build_clip_name(
             chamber_id=ctx.chamber.chamber_id,
             wave_id=ctx.wave.wave_id,
             video_stem=video.stem,
             start_sec=start_sec,
-            transformed=bool(rois),
+            transformed=tf is not None,
         )
         clip_path = output_dir / clip_name
 
-        tf = transformers.get(video.name)
         print(f"  [{len(new_rows)+1}/{n}] {clip_name} …", end=" ", flush=True)
         ok = extract_clip(str(video), start_sec, duration,
                           str(clip_path), transformer=tf)
