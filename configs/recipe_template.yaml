@@ -12,10 +12,15 @@
 #  The build tool produces:
 #      {workspace}/datasets/{name}/
 #          recipe.yaml      ← this file, copied verbatim
-#          manifest.csv     ← which (clip, frame, split) tuples got picked
+#          manifest.csv     ← which (clip, frame, split, batch) tuples got picked
 #          data.yaml        ← Ultralytics-format pointer
 #          images/{train,val,test}/  ← symlinks into ../../frames/
-#          labels/{train,val,test}/  ← symlinks into ../../annotations/
+#          labels/{train,val,test}/  ← symlinks into ../../annotations/{batch}/
+#
+#  Frames live flat at frames/{chamber_id}/{wave_id}/<frame_stem>.png.
+#  Annotations live in flat batches at
+#  annotations/{batch_id}/<frame_stem>.txt; the same frame may appear in
+#  multiple batches, see the `annotations:` block below.
 #
 #  Datasets are immutable once built. Want a different mix? Write a
 #  new recipe with a different `name:` and run build_dataset again –
@@ -36,10 +41,20 @@ exclude:
   source_videos: []                   # basenames to skip, e.g. [Day1_RGB.mkv]
   clip_paths:    []                   # exact clip_path values from all_clips.csv
 
-# Only consider clips that have been annotated (annotations/.../{stem}/ exists
-# and contains at least one .txt). Set to false to include unannotated clips
-# – useful for inference-only dataset builds.
+# Only keep frames that have a .txt label in at least one selected batch.
+# An empty .txt (negative sample) still counts as annotated.
+# Set to false to include un-labelled frames – useful for inference-only
+# dataset builds.
 require_annotations: true
+
+# ─── Annotation batch selection ────────────────────────────────────
+# Annotations live in a flat journal under annotations/{batch_id}/.
+# Each batch is one CVAT export snapshot. The same frame can appear in
+# multiple batches (re-annotation); `resolution` decides which wins.
+annotations:
+  batches:         ["*"]    # ["*"] = all batches, or explicit list of batch_ids
+  exclude_batches: []
+  resolution:      latest   # latest | first | error
 
 # ─── Train / val / test split ──────────────────────────────────────
 split:

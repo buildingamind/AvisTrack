@@ -3,27 +3,39 @@
 tools/build_dataset.py
 ──────────────────────
 Materialise one ``datasets/{recipe.name}/`` view from a chamber-type
-workspace's ``clips/`` + ``frames/`` + ``annotations/`` inventory.
+workspace's ``clips/`` + ``frames/`` (flat) + ``annotations/`` (flat-batch)
+inventory.
+
+Annotation layout (flat-batch journal)::
+
+    {workspace}/{chamber_type}/annotations/
+        {chamber_type}_{YYYY-MM-DD}_batchNN/
+            _meta.json
+            obj.names
+            <frame_full_filename>.txt    (flat; empty .txt = negative sample)
+
+A frame may appear in multiple batches (re-annotation). The recipe's
+``annotations.resolution`` field decides which wins (``latest`` | ``first``
+| ``error``).
+
+Frame layout (flat)::
+
+    {workspace}/{chamber_type}/frames/{chamber_id}/{wave_id}/<frame_stem>.png
 
 Output layout (Ultralytics-compatible)::
 
     {workspace}/{chamber_type}/datasets/{name}/
         recipe.yaml      ← copy of the input recipe (frozen at build time)
-        manifest.csv     ← per-frame: split, chamber, wave, clip_stem, image, label
+        manifest.csv     ← per-frame: split, chamber, wave, clip, frame, batch, image, label
         data.yaml        ← Ultralytics dataset config
         images/{train,val,test}/<symlink>.png
         labels/{train,val,test}/<symlink>.txt
 
-The build is deterministic given the recipe + workspace state: same
-``recipe.split.seed`` and same source frames → identical splits. Datasets
-are immutable: re-running with the same name refuses to overwrite unless
-``--force`` is passed (in which case the directory is wiped first).
-
 Usage
 -----
     python tools/build_dataset.py \\
-        --workspace-yaml /media/ssd/avistrack/collective/workspace.yaml \\
-        --recipe         datasets_recipes/full_v1.yaml
+        --workspace-yaml /media/.../vr/workspace.yaml \\
+        --recipe         configs/VR/recipe_pre-w4_vr_2026-05-02.yaml
 """
 
 from __future__ import annotations
@@ -45,6 +57,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from avistrack.config import RecipeConfig, load_recipe, load_workspace  # noqa: E402
+from avistrack.config.loader import load_sources  # noqa: E402
+from tools.import_annotations import parse_frame_name  # noqa: E402
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
 SPLITS = ("train", "val", "test")
@@ -78,51 +92,104 @@ def filter_clips(rows: list[dict], recipe: RecipeConfig) -> list[dict]:
     return out
 
 
-# ── Frame enumeration ────────────────────────────────────────────────────
+# ── Annotation batch resolution ──────────────────────────────────────────
 
-def find_image_for_label(frames_dir: Path, stem: str) -> Optional[Path]:
-    for ext in IMAGE_EXTENSIONS:
-        cand = frames_dir / f"{stem}{ext}"
-        if cand.exists():
-            return cand
-    return None
+def list_eligible_batches(annotations_root: Path, ann_cfg) -> list[str]:
+    """List batch directories that pass the recipe's annotations filter.
 
-
-def collect_frames(
-    annotations_root: Path,
-    frames_root:      Path,
-    clip_row:         dict,
-) -> list[dict]:
+    Returned list is sorted ascending by batch_id (= sorted by date+NN).
     """
-    For one clip row, return a list of {chamber_id, wave_id, clip_stem,
-    image_path, label_path, frame_stem} for every (image, label) pair
-    that exists on disk.
-    """
-    chamber_id = clip_row["chamber_id"]
-    wave_id    = clip_row["wave_id"]
-    clip_stem  = Path(clip_row["clip_path"]).stem
-
-    ann_dir   = annotations_root / chamber_id / wave_id / clip_stem
-    frame_dir = frames_root      / chamber_id / wave_id / clip_stem
-
-    if not ann_dir.is_dir():
+    if not annotations_root.is_dir():
         return []
+    available = sorted(
+        p.name for p in annotations_root.iterdir()
+        if p.is_dir() and (p / "_meta.json").exists()
+    )
+    if ann_cfg.batches == ["*"]:
+        kept = list(available)
+    else:
+        unknown = [b for b in ann_cfg.batches if b not in available]
+        if unknown:
+            raise SystemExit(
+                f"recipe.annotations.batches references unknown batch_id(s): "
+                f"{unknown!r} (available: {available!r})"
+            )
+        kept = [b for b in available if b in ann_cfg.batches]
+    excluded = set(ann_cfg.exclude_batches)
+    return [b for b in kept if b not in excluded]
 
+
+def resolve_labels(
+    annotations_root: Path,
+    batches:          list[str],
+    resolution:       str,
+) -> dict[str, Path]:
+    """Build {frame_stem: label_path}, applying multi-batch resolution policy.
+
+    ``batches`` arrives sorted ascending; ``latest`` picks the highest-sorting
+    batch_id, ``first`` picks the lowest, ``error`` raises on duplicates.
+    """
+    frame_to_hits: dict[str, list[tuple[str, Path]]] = defaultdict(list)
+    for batch_id in batches:
+        for txt in (annotations_root / batch_id).glob("*.txt"):
+            if txt.name.startswith("_"):
+                continue
+            frame_to_hits[txt.stem].append((batch_id, txt))
+
+    batch_order = {b: i for i, b in enumerate(batches)}
+    out: dict[str, Path] = {}
+    for stem, hits in frame_to_hits.items():
+        if len(hits) == 1:
+            out[stem] = hits[0][1]
+            continue
+        if resolution == "error":
+            ids = [h[0] for h in hits]
+            raise SystemExit(
+                f"frame {stem!r} found in {len(hits)} batches: {ids!r}; "
+                f"set annotations.resolution=latest|first to disambiguate"
+            )
+        hits.sort(key=lambda h: batch_order[h[0]])
+        out[stem] = hits[-1][1] if resolution == "latest" else hits[0][1]
+    return out
+
+
+# ── Frame enumeration (flat layout) ──────────────────────────────────────
+
+def enumerate_flat_frames(
+    frames_root:           Path,
+    sources,
+    eligible_clip_stems:   set[str],
+) -> list[dict]:
+    """Walk ``frames/{ch}/{wv}/*.png`` (non-recursive) and decode names.
+
+    Frames whose decoded ``clip_stem`` is not in ``eligible_clip_stems``
+    are skipped. Subdirectories like ``_rejected/`` are ignored because
+    we only ``glob('*.png')`` directly inside the wave dir.
+    """
     out = []
-    for label in sorted(ann_dir.glob("*.txt")):
-        if label.name.startswith("_"):  # skip _meta and friends
+    if not frames_root.is_dir():
+        return out
+    for ch_dir in sorted(frames_root.iterdir()):
+        if not ch_dir.is_dir():
             continue
-        image = find_image_for_label(frame_dir, label.stem)
-        if image is None:
-            continue
-        out.append({
-            "chamber_id": chamber_id,
-            "wave_id":    wave_id,
-            "clip_stem":  clip_stem,
-            "frame_stem": label.stem,
-            "image_path": image,
-            "label_path": label,
-        })
+        for wv_dir in sorted(ch_dir.iterdir()):
+            if not wv_dir.is_dir():
+                continue
+            for img in sorted(wv_dir.glob("*.png")):
+                stem = img.stem
+                try:
+                    ch_id, wv_id, clip_stem = parse_frame_name(stem, sources)
+                except ValueError:
+                    continue
+                if clip_stem not in eligible_clip_stems:
+                    continue
+                out.append({
+                    "chamber_id": ch_id,
+                    "wave_id":    wv_id,
+                    "clip_stem":  clip_stem,
+                    "frame_stem": stem,
+                    "image_path": img,
+                })
     return out
 
 
@@ -139,11 +206,9 @@ def stratify_key(frame: dict, mode: str) -> str:
 
 
 def split_frames(frames: list[dict], recipe: RecipeConfig) -> dict[str, list[dict]]:
-    """
-    Group by stratify key, shuffle each group with the recipe seed,
+    """Group by stratify key, shuffle each group with the recipe seed,
     then slice each group according to ``ratios``. Splits with ratio 0
-    (or absent) are omitted from the output.
-    """
+    (or absent) are omitted from the output."""
     rnd = random.Random(recipe.split.seed)
     groups: dict[str, list[dict]] = defaultdict(list)
     for f in frames:
@@ -159,7 +224,6 @@ def split_frames(frames: list[dict], recipe: RecipeConfig) -> dict[str, list[dic
         group = groups[key][:]
         rnd.shuffle(group)
         n = len(group)
-        # cumulative cut points so all frames are assigned exactly once
         cuts = [int(round(sum(norm[:i + 1]) * n)) for i in range(len(split_names))]
         prev = 0
         for s, cut in zip(split_names, cuts):
@@ -195,8 +259,8 @@ def unique_link_name(frame: dict, ext: str) -> str:
 
 def materialise(
     dataset_dir: Path,
-    splits: dict[str, list[dict]],
-    recipe: RecipeConfig,
+    splits:      dict[str, list[dict]],
+    recipe:      RecipeConfig,
     recipe_path: Path,
 ) -> Path:
     """Write images/, labels/, data.yaml, manifest.csv, recipe.yaml."""
@@ -206,21 +270,32 @@ def materialise(
     for split, frames in splits.items():
         for f in frames:
             img_name = unique_link_name(f, f["image_path"].suffix.lower())
-            lbl_name = unique_link_name(f, ".txt")
             img_dst  = dataset_dir / "images" / split / img_name
-            lbl_dst  = dataset_dir / "labels" / split / lbl_name
             mode_img = _link_or_copy(f["image_path"], img_dst)
-            mode_lbl = _link_or_copy(f["label_path"], lbl_dst)
+
+            label_path = f.get("label_path")
+            if label_path is not None:
+                lbl_name = unique_link_name(f, ".txt")
+                lbl_dst  = dataset_dir / "labels" / split / lbl_name
+                mode_lbl = _link_or_copy(label_path, lbl_dst)
+                label_link = str(lbl_dst.relative_to(dataset_dir))
+                label_src  = str(label_path)
+            else:
+                mode_lbl   = "none"
+                label_link = ""
+                label_src  = ""
+
             manifest_rows.append({
                 "split":      split,
                 "chamber_id": f["chamber_id"],
                 "wave_id":    f["wave_id"],
                 "clip_stem":  f["clip_stem"],
                 "frame_stem": f["frame_stem"],
+                "batch_id":   f.get("batch_id", ""),
                 "image_link": str(img_dst.relative_to(dataset_dir)),
-                "label_link": str(lbl_dst.relative_to(dataset_dir)),
+                "label_link": label_link,
                 "image_src":  str(f["image_path"]),
-                "label_src":  str(f["label_path"]),
+                "label_src":  label_src,
                 "link_mode":  f"img={mode_img}/lbl={mode_lbl}",
             })
 
@@ -277,22 +352,39 @@ def build(
         rows = list(csv.DictReader(f))
 
     eligible_clips = filter_clips(rows, recipe)
+    eligible_clip_stems = {Path(r["clip_path"]).stem for r in eligible_clips}
+
+    sources_yaml = workspace_chamber_dir / "sources.yaml"
+    if not sources_yaml.exists():
+        raise SystemExit(f"sources.yaml not found: {sources_yaml}")
+    sources = load_sources(sources_yaml, probe=False)
+
+    all_frames = enumerate_flat_frames(frames_root, sources, eligible_clip_stems)
+
+    batches    = list_eligible_batches(annotations_root, recipe.annotations)
+    labels_map = resolve_labels(annotations_root, batches, recipe.annotations.resolution)
 
     frames: list[dict] = []
-    skipped_unannotated = 0
-    for row in eligible_clips:
-        per_clip = collect_frames(annotations_root, frames_root, row)
-        if not per_clip:
+    skipped_no_label = 0
+    for f in all_frames:
+        label = labels_map.get(f["frame_stem"])
+        if label is None:
             if recipe.require_annotations:
-                skipped_unannotated += 1
+                skipped_no_label += 1
                 continue
-        frames.extend(per_clip)
+            f["label_path"] = None
+            f["batch_id"]   = ""
+        else:
+            f["label_path"] = label
+            f["batch_id"]   = label.parent.name
+        frames.append(f)
 
     if not frames:
         raise SystemExit(
-            f"no labelled frames matched recipe '{recipe.name}'. "
-            f"({len(eligible_clips)} clip(s) survived filtering, "
-            f"{skipped_unannotated} were unannotated.)"
+            f"no frames matched recipe '{recipe.name}'. "
+            f"({len(eligible_clips)} clip(s) eligible, "
+            f"{len(all_frames)} frame(s) discovered, "
+            f"{skipped_no_label} had no annotation in selected batches.)"
         )
 
     splits = split_frames(frames, recipe)
@@ -309,11 +401,14 @@ def build(
     materialise(dataset_dir, splits, recipe, recipe_path)
 
     return {
-        "dataset_dir":  dataset_dir,
-        "n_clips":      len(eligible_clips),
-        "n_frames":     len(frames),
-        "skipped_unannotated": skipped_unannotated,
-        "splits":       {s: len(splits[s]) for s in splits},
+        "dataset_dir":      dataset_dir,
+        "n_clips":          len(eligible_clips),
+        "n_frames_total":   len(all_frames),
+        "n_frames":         len(frames),
+        "skipped_no_label": skipped_no_label,
+        "n_batches":        len(batches),
+        "batches":          batches,
+        "splits":           {s: len(splits[s]) for s in splits},
     }
 
 
@@ -332,10 +427,12 @@ def main():
         force=args.force,
     )
 
-    print(f"\n✅ Built dataset at {summary['dataset_dir']}")
+    print(f"\n[OK] Built dataset at {summary['dataset_dir']}")
     print(f"   eligible clips      : {summary['n_clips']}")
-    print(f"   skipped unannotated : {summary['skipped_unannotated']}")
-    print(f"   frames              : {summary['n_frames']}")
+    print(f"   frames discovered   : {summary['n_frames_total']}")
+    print(f"   skipped no-label    : {summary['skipped_no_label']}")
+    print(f"   batches used        : {summary['n_batches']} {summary['batches']!r}")
+    print(f"   frames in dataset   : {summary['n_frames']}")
     for s, n in summary["splits"].items():
         print(f"     {s:5s} : {n}")
 

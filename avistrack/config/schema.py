@@ -197,6 +197,29 @@ class RecipeExclude(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class RecipeAnnotations(BaseModel):
+    """Selects which annotation batches feed the dataset build.
+
+    Annotations live in a flat journal at
+    ``annotations/{batch_id}/<frame_stem>.txt``. The same frame may appear in
+    multiple batches (re-annotation); ``resolution`` decides which wins.
+    """
+    batches:         list[str] = ["*"]   # batch_ids or ["*"]
+    exclude_batches: list[str] = []
+    resolution:      str       = "latest"   # latest | first | error
+
+    model_config = {"extra": "allow"}
+
+    @field_validator("resolution")
+    @classmethod
+    def _check_resolution(cls, v: str) -> str:
+        if v not in {"latest", "first", "error"}:
+            raise ValueError(
+                f"annotations.resolution must be one of latest|first|error, got {v!r}"
+            )
+        return v
+
+
 class RecipeSplit(BaseModel):
     ratios:    dict[str, float] = {"train": 0.8, "val": 0.1, "test": 0.1}
     stratify:  str = "chamber"   # chamber | wave | clip | none
@@ -236,11 +259,12 @@ class RecipeConfig(BaseModel):
     """
     name:         str
     chamber_type: str
-    include:      RecipeInclude  = RecipeInclude()
-    exclude:      RecipeExclude  = RecipeExclude()
-    require_annotations: bool    = True
-    split:        RecipeSplit    = RecipeSplit()
-    classes:      list[str]      = ["chick"]
+    include:      RecipeInclude       = RecipeInclude()
+    exclude:      RecipeExclude       = RecipeExclude()
+    require_annotations: bool         = True
+    annotations:  RecipeAnnotations   = RecipeAnnotations()
+    split:        RecipeSplit         = RecipeSplit()
+    classes:      list[str]           = ["chick"]
 
     model_config = {"extra": "allow"}
 
