@@ -5,8 +5,9 @@ tools/01b_select_frames.py
 Model-signal frame selection — the targeted alternative to 01a_sample_clips.
 
 Instead of sampling random clips, this reads the *previous model's per-frame
-tracking output* (the 04_Tracking_RGB parquets) and selects the frames that
-are most worth annotating, grouped into interpretable buckets:
+tracking output* (04_Tracking_RGB/raw/*.parquet) for a (chamber, wave),
+keeps only frames inside the experiment's **valid ranges**, and selects the
+frames most worth annotating, grouped into interpretable buckets:
 
   dup       n_det > 1            — false positives (e.g. food dish read as a
                                    2nd chick, or an edge chick split in two)
@@ -14,34 +15,37 @@ are most worth annotating, grouped into interpretable buckets:
   miss      n_det == 0           — the model found nothing
   coverage  everything else      — normal frames, for plain coverage
 
-You set the per-bucket QUOTA (how many frames from each). The tool does not
-decide the sampling policy — it is a mechanism; the quotas are yours.
+Valid-range filtering is MANDATORY (see avistrack.valid_ranges): without it
+the pool is dominated by pre-experiment empty-cage footage.
 
-This entry point is PHASE 1 (planning): it is read-only. It computes the
-candidate pools, applies your quotas with temporal de-duplication, and writes
-a selection plan CSV. It never touches the workspace. PHASE 2
+You set the per-bucket QUOTA. The tool is a mechanism, not a policy — the
+quotas are yours.
+
+PHASE 1 (this entry point) is read-only planning: it computes the candidate
+pools, applies your quotas with temporal de-duplication, and writes a
+selection plan CSV. It never writes to the workspace. PHASE 2
 (materialisation: decode → perspective-transform 640×640 → register virtual
-clips in all_clips.csv → write flat frames + triage manifest) runs only after
-you have reviewed the pool and set final quotas.
+clips in all_clips.csv → flat frames + triage manifest) follows once quotas
+are set.
 
 Usage
 -----
-    # Report the candidate pool (no quotas needed) + write full plan:
+    # True (valid-filtered) candidate pool:
     python tools/01b_select_frames.py \\
-        --tracking-dir E:/Wave4_PairedCapacityPlus/04_Tracking_RGB/raw \\
-        --report-only
+        --workspace-yaml F:/BAM/avistrack_workspace/plus/workspace.yaml \\
+        --sources-yaml   sources_wave4_temp.yaml \\
+        --chamber-id plus_103A --wave-id wave4 --report-only
 
-    # Select with explicit per-bucket quotas:
-    python tools/01b_select_frames.py \\
-        --tracking-dir E:/Wave4_PairedCapacityPlus/04_Tracking_RGB/raw \\
-        --n-dup 500 --n-lowconf 150 --n-miss 50 --n-coverage 100 \\
-        --lowconf-thresh 0.4 --min-frame-gap 15 --seed 42 \\
-        --out plan.csv
+    # Select with per-bucket quotas → plan CSV:
+    python tools/01b_select_frames.py --workspace-yaml ... --sources-yaml ... \\
+        --chamber-id plus_103A --wave-id wave4 \\
+        --n-dup 280 --n-lowconf 40 --n-miss 0 --n-coverage 80 --out plan_103A.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -51,7 +55,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from avistrack import valid_ranges as vrmod  # noqa: E402
+from avistrack.core.time_lookup import load_segment_starts  # noqa: E402
+from avistrack.workspace import load_context  # noqa: E402
+
 BUCKETS = ("dup", "lowconf", "miss", "coverage")
+SESSION_RE = re.compile(r"(Day\d+_\d{6}_\d{4})")   # tracking parquet stem key
 
 
 # ── Signal → bucket ───────────────────────────────────────────────────────
@@ -136,25 +145,52 @@ def select_candidates(
     return pd.concat(picked).sort_values(["source_video", "frame"])
 
 
-# ── Parquet loading ───────────────────────────────────────────────────────
+# ── Load valid-range-filtered tracking for one (chamber, wave) ─────────────
 
-def load_tracking(tracking_dir: Path) -> pd.DataFrame:
-    """Concatenate every per-session tracking parquet, tagging source_video."""
-    parquets = sorted(tracking_dir.glob("*.parquet"))
-    if not parquets:
-        raise SystemExit(f"no .parquet files under {tracking_dir}")
-    frames = []
-    for p in parquets:
-        d = pd.read_parquet(p, columns=None)
-        d = d.copy()
-        d["source_video"] = p.stem
-        frames.append(d)
-    df = pd.concat(frames, ignore_index=True)
-    for col in ("frame", "conf", "n_det"):
-        if col not in df.columns:
-            raise SystemExit(f"tracking parquet missing required column {col!r} "
-                             f"(have {list(df.columns)})")
-    return df
+def load_valid_tracking(ctx, modality: str = "rgb") -> tuple[pd.DataFrame, dict]:
+    """Concatenate every session's tracking parquet, keeping only frames
+    inside valid_ranges. Returns (df, stats). df has a 'source_video'
+    (session) column. valid_ranges filtering is mandatory."""
+    vr = vrmod.load_valid_ranges(ctx.valid_ranges_file)
+    if not vr:
+        raise SystemExit(
+            f"valid_ranges.json missing/empty at {ctx.valid_ranges_file}. "
+            f"Valid-range filtering is mandatory for selection.")
+    starts = load_segment_starts(ctx.timestamp_calibration_file)
+    fps = float(getattr(ctx.workspace.chamber, "fps", None) or 30.0)
+    trk = ctx.wave_root / "04_Tracking_RGB" / "raw"
+    if not trk.is_dir():
+        raise SystemExit(f"tracking dir not found: {trk}")
+
+    parts, n_vids, n_used = [], 0, 0
+    for vp in ctx.list_videos(modality=modality):
+        n_vids += 1
+        V = vp.name
+        if V not in vr or V not in starts:
+            continue
+        m = SESSION_RE.search(V)
+        if not m:
+            continue
+        tp = trk / f"{m.group(1)}.parquet"
+        if not tp.exists():
+            continue
+        df = pd.read_parquet(tp).copy()
+        n = int(df["frame"].max()) + 1
+        wins = vrmod.frame_windows(vr[V], starts[V], fps, n)
+        if not wins:
+            continue
+        d = df[vrmod.valid_mask(df["frame"].to_numpy(), wins)].copy()
+        d["source_video"] = m.group(1)
+        parts.append(d)
+        n_used += 1
+
+    if not parts:
+        raise SystemExit(
+            "no valid-range frames found — check valid_ranges.json, "
+            "timestamp_calibration.jsonl (needs new_segment events), and the "
+            "04_Tracking_RGB/raw parquets.")
+    df = pd.concat(parts, ignore_index=True)
+    return df, {"videos": n_vids, "sessions_used": n_used, "fps": fps}
 
 
 def report_pools(df: pd.DataFrame, lowconf_thresh: float) -> dict[str, int]:
@@ -167,11 +203,15 @@ def report_pools(df: pd.DataFrame, lowconf_thresh: float) -> dict[str, int]:
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tracking-dir", required=True, type=Path,
-                    help="Directory of per-session tracking parquets (04_Tracking_RGB/raw)")
+    ap.add_argument("--workspace-yaml", required=True, type=Path)
+    ap.add_argument("--sources-yaml", type=Path, default=None,
+                    help="sources.yaml (default: sibling of workspace.yaml)")
+    ap.add_argument("--chamber-id", required=True)
+    ap.add_argument("--wave-id", required=True)
+    ap.add_argument("--modality", default="rgb", choices=["rgb", "ir"])
     ap.add_argument("--lowconf-thresh", type=float, default=0.4)
     ap.add_argument("--min-frame-gap", type=int, default=15,
-                    help="Min frames between selected frames of the same video")
+                    help="Min frames between selected frames of the same session")
     ap.add_argument("--n-dup",      type=int, default=0)
     ap.add_argument("--n-lowconf",  type=int, default=0)
     ap.add_argument("--n-miss",     type=int, default=0)
@@ -183,10 +223,16 @@ def main():
                     help="Write the selection plan CSV here")
     args = ap.parse_args()
 
-    df = load_tracking(args.tracking_dir)
+    sources_yaml = args.sources_yaml or args.workspace_yaml.with_name("sources.yaml")
+    ctx = load_context(
+        workspace_yaml=args.workspace_yaml, sources_yaml=sources_yaml,
+        chamber_id=args.chamber_id, wave_id=args.wave_id, require_drive=True)
+
+    df, stats = load_valid_tracking(ctx, modality=args.modality)
     pools = report_pools(df, args.lowconf_thresh)
 
-    print(f"Loaded {len(df):,} frame-rows from {args.tracking_dir}")
+    print(f"{args.chamber_id}/{args.wave_id}: {len(df):,} valid-range frames "
+          f"from {stats['sessions_used']}/{stats['videos']} session(s), fps={stats['fps']:g}")
     print(f"Candidate pools (lowconf<{args.lowconf_thresh}):")
     for k in BUCKETS:
         print(f"  {k:9s}: {pools[k]:>10,}")
@@ -210,7 +256,7 @@ def main():
         cols = [c for c in ("source_video", "frame", "bucket", "conf", "n_det",
                             "cx", "cy", "w", "h", "lum", "fdiff") if c in sel.columns]
         sel[cols].to_csv(args.out, index=False)
-        print(f"\nPlan written → {args.out}")
+        print(f"\nPlan written -> {args.out}")
     print("\nNext (PHASE 2, writes to workspace): materialise the plan — decode "
           "each frame, perspective-transform to 640x640, register virtual clips "
           "in all_clips.csv, write flat frames + triage manifest for 03_review_triage.")

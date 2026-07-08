@@ -61,7 +61,7 @@ differ by a letter suffix (`01a`, `01b`).
 |---|---|---|
 | `00_status.py` | status | Read-only dashboard: clips / annotations / datasets / models per chamber×wave. Writes nothing. |
 | `01a_sample_clips.py` | select | Weighted-random 3 s clips from raw videos; perspective-warps to 640×640; appends `all_clips.csv`. |
-| `01b_select_frames.py` | select | Model-signal frame selection from the previous model's tracking parquets. **Phase 1 (built, read-only):** buckets frames (dup / lowconf / miss / coverage), applies your per-bucket quotas + temporal de-dup, writes a plan CSV. **Phase 2 (pending):** materialise the plan — decode → warp 640×640 → register virtual clips → flat frames + triage manifest. |
+| `01b_select_frames.py` | select | Model-signal frame selection (workspace-mode). Reads the previous model's tracking parquets, keeps only **valid-range** frames (mandatory; see `avistrack/valid_ranges.py`), buckets them (dup / lowconf / miss / coverage). **Phase 1 (built, read-only):** applies your per-bucket quotas + temporal de-dup, writes a plan CSV. **Phase 2 (pending):** materialise — decode → warp 640×640 → register virtual clips → flat frames + triage manifest. |
 | `02_extract_frames.py` | triage-prep | Even-spaced frames per clip + dHash dedup → candidate PNGs + `manifests/triage/{batch}.csv`. |
 | `03_review_triage.py` | triage | Interactive keep/drop of candidate frames; rejects move to `_rejected/`. |
 | `04_import_annotations.py` | import | CVAT project zip → flat `annotations/{batch_id}/` + `annotation_batches.csv`. |
