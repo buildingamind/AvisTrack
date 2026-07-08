@@ -161,8 +161,8 @@ def test_workspace_run_resolves_paths(tmp_path: Path, captured_runs):
     assert args["lr0"]     == 0.001            # extra field preserved
     assert args["epochs"]  == 2
     # data + project are workspace-derived
-    assert args["data"].endswith("/datasets/full_v1/data.yaml")
-    assert args["project"].endswith("/models/W2_test/phase1")
+    assert args["data"].replace("\\", "/").endswith("/datasets/full_v1/data.yaml")
+    assert args["project"].replace("\\", "/").endswith("/models/W2_test/phase1")
 
 
 def test_workspace_run_resolves_relative_phase_path(tmp_path: Path, captured_runs):

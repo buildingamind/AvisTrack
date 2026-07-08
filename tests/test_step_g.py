@@ -338,7 +338,7 @@ def test_freeze_tracker_config_overrides_drive_and_output(tmp_path: Path):
     assert frozen.exists()
     raw = yaml.safe_load(frozen.read_text())
     # Drive section is fully resolved, no PLACEHOLDER strings remain.
-    assert raw["drive"]["raw_videos"].endswith("Wave2/00_raw_videos")
+    assert raw["drive"]["raw_videos"].replace("\\", "/").endswith("Wave2/00_raw_videos")
     assert raw["drive"]["roi_file"].endswith("camera_rois.json")
     assert raw["drive"]["time_calibration"].endswith("time_calibration.json")
     # Weights replaced.

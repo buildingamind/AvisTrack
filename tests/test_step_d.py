@@ -296,44 +296,82 @@ def test_import_rejects_bad_label(tmp_path: Path):
 
 # ── build_dataset (end-to-end) ─────────────────────────────────────────
 
-def _seed_workspace_with_clips(workspace_chamber_dir: Path, plan: list[dict]) -> Path:
-    """Populate manifests/all_clips.csv + frames/ + annotations/ for testing.
+def _seed_workspace_with_clips(
+    workspace_chamber_dir: Path,
+    plan: list[dict],
+    chamber_type: str = "collective",
+    batch_id: str = "collective_2026-05-01_batch01",
+) -> Path:
+    """Populate the workspace for the *flat-batch* build_dataset contract:
+    manifests/all_clips.csv + flat frames/{ch}/{wv}/*.png + one flat
+    annotation batch under annotations/{batch_id}/ + a sources.yaml (needed
+    so parse_frame_name can attribute each frame).
 
-    plan items: {chamber, wave, layout, clip_stem, n_frames}
+    plan items: {chamber, wave, clip_stem, n_frames, layout?, annotate?}
+    The real workspace stem is ``{chamber}_{wave}_{clip_stem}_transformed``
+    (parse_frame_name-compatible). ``annotate=False`` seeds frames with no
+    label so they count as skipped_no_label.
     """
     rows = []
+    frames_root = workspace_chamber_dir / "frames"
+    batch_dir   = workspace_chamber_dir / "annotations" / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    by_cw: dict[str, dict] = {}
+    chambers_map: dict[str, dict] = {}   # chamber_id -> {wave_id: layout}
+
     for spec in plan:
         chamber, wave = spec["chamber"], spec["wave"]
-        clip_stem = spec["clip_stem"]
-        layout    = spec.get("layout", "structured")
-        n_frames  = spec["n_frames"]
-        rel_clip  = f"clips/{chamber}/{wave}/{clip_stem}.mp4"
+        short   = spec["clip_stem"]
+        layout  = spec.get("layout", "structured")
+        n       = spec["n_frames"]
+        do_ann  = spec.get("annotate", True)
+        stem    = f"{chamber}_{wave}_{short}_transformed"
+        rel_clip = f"clips/{chamber}/{wave}/{stem}.mp4"
 
-        frame_dir = workspace_chamber_dir / "frames"      / chamber / wave / clip_stem
-        ann_dir   = workspace_chamber_dir / "annotations" / chamber / wave / clip_stem
-        frame_dir.mkdir(parents=True, exist_ok=True)
-        ann_dir.mkdir(parents=True, exist_ok=True)
-        for i in range(1, n_frames + 1):
-            (frame_dir / f"frame_{i:03d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-            (ann_dir   / f"frame_{i:03d}.txt").write_text("0 0.5 0.5 0.1 0.1\n")
+        chambers_map.setdefault(chamber, {})[wave] = layout
+        fdir = frames_root / chamber / wave
+        fdir.mkdir(parents=True, exist_ok=True)
+        for i in range(n):
+            fstem = f"{stem}_f{i:06d}"
+            (fdir / f"{fstem}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            if do_ann:
+                (batch_dir / f"{fstem}.txt").write_text("0 0.5 0.5 0.1 0.1\n")
+        if do_ann:
+            e = by_cw.setdefault(f"{chamber}/{wave}", {"n": 0, "pos": 0, "neg": 0})
+            e["n"] += n
+            e["pos"] += n
         rows.append({
             "clip_path": rel_clip,
             "chamber_id": chamber, "wave_id": wave,
-            "source_video": f"{clip_stem}.mkv",
+            "source_video": f"{stem}.mkv",
             "source_drive_uuid": "ABCD-1234",
             "layout": layout,
             "start_sec": "10.00", "duration_sec": "3.00",
             "fps": "30.0", "sampled_at": "2026-05-01T00:00:00+00:00",
         })
 
+    # flat-batch _meta.json (list_eligible_batches only requires it to exist)
+    (batch_dir / "_meta.json").write_text(json.dumps({
+        "batch_id": batch_id, "chamber_type": chamber_type,
+        "n_frames": sum(v["n"] for v in by_cw.values()),
+        "by_chamber_wave": by_cw,
+    }, indent=2))
+
+    # sources.yaml so parse_frame_name can attribute each flat frame
+    sources = {"chamber_type": chamber_type, "chambers": [
+        {"chamber_id": ch, "drive_uuid": "ABCD-1234", "waves": [
+            {"wave_id": w, "layout": lay, "wave_subpath": f"{w}/data"}
+            for w, lay in waves.items()
+        ]} for ch, waves in chambers_map.items()
+    ]}
+    (workspace_chamber_dir / "sources.yaml").write_text(
+        yaml.safe_dump(sources, sort_keys=False))
+
     manifest = workspace_chamber_dir / "manifests" / "all_clips.csv"
     _write_manifest(manifest, rows)
     return manifest
 
 
-@pytest.mark.xfail(reason="seeds obsolete nested per-clip layout; build_dataset "
-                          "is now flat-batch (see docs/DATA_PIPELINE.md §6) — "
-                          "rewrite for flat-batch pending", strict=False)
 def test_build_dataset_full_v1_then_chambers_1and2(tmp_path: Path):
     """Verification §5 row D: two recipes, two coexisting datasets."""
     build = _load_tool("05_build_dataset.py")
@@ -398,9 +436,6 @@ def test_build_dataset_full_v1_then_chambers_1and2(tmp_path: Path):
     assert {r["chamber_id"] for r in rows} == {"collective_104A", "collective_104B"}
 
 
-@pytest.mark.xfail(reason="seeds obsolete nested per-clip layout; build_dataset "
-                          "is now flat-batch (see docs/DATA_PIPELINE.md §6) — "
-                          "rewrite for flat-batch pending", strict=False)
 def test_build_dataset_refuses_overwrite(tmp_path: Path):
     build = _load_tool("05_build_dataset.py")
     workspace_root = _bootstrap_workspace(tmp_path)
@@ -433,29 +468,23 @@ def test_build_dataset_chamber_type_mismatch(tmp_path: Path):
         build.build(workspace_yaml=workspace_yaml, recipe_path=recipe, force=False)
 
 
-@pytest.mark.xfail(reason="seeds obsolete nested per-clip layout; build_dataset "
-                          "is now flat-batch (see docs/DATA_PIPELINE.md §6) — "
-                          "rewrite for flat-batch pending", strict=False)
-def test_build_dataset_skips_unannotated_clips(tmp_path: Path):
+def test_build_dataset_skips_frames_without_labels(tmp_path: Path):
     build = _load_tool("05_build_dataset.py")
     workspace_root = _bootstrap_workspace(tmp_path)
     workspace_yaml = workspace_root / "collective" / "workspace.yaml"
     chamber_dir    = workspace_root / "collective"
 
-    # Two clips: one annotated, one not.
+    # One clip's frames are labelled; another clip's frames have no label in
+    # any batch → those frames count as skipped_no_label.
     _seed_workspace_with_clips(chamber_dir, [
-        {"chamber": "c", "wave": "w", "clip_stem": "annotated",   "n_frames": 4},
+        {"chamber": "collective_104A", "wave": "w", "clip_stem": "annotated",
+         "n_frames": 4, "annotate": True},
+        {"chamber": "collective_104A", "wave": "w", "clip_stem": "bare",
+         "n_frames": 3, "annotate": False},
     ])
-    # Manually add an unannotated clip row (no frames/annotations dirs)
-    manifest = chamber_dir / "manifests" / "all_clips.csv"
-    rows = list(csv.DictReader(manifest.open()))
-    rows.append(_row(chamber_id="c", wave_id="w",
-                     clip_path="clips/c/w/unannotated.mp4",
-                     source_video="unannotated.mkv"))
-    _write_manifest(manifest, rows)
 
     recipe = _write_recipe(tmp_path / "r.yaml", name="d1",
                            split={"ratios": {"train": 1.0}, "stratify": "none", "seed": 1})
     summary = build.build(workspace_yaml=workspace_yaml, recipe_path=recipe, force=False)
-    assert summary["skipped_unannotated"] == 1
+    assert summary["skipped_no_label"] == 3
     assert summary["n_frames"] == 4
