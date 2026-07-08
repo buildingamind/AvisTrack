@@ -45,8 +45,10 @@ Usage
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -198,6 +200,133 @@ def report_pools(df: pd.DataFrame, lowconf_thresh: float) -> dict[str, int]:
     return {k: int((b == k).sum()) for k in BUCKETS}
 
 
+# ── Phase 2: materialise the selection ────────────────────────────────────
+
+ALL_CLIPS_FIELDS = [
+    "clip_path", "chamber_id", "wave_id", "source_video", "source_drive_uuid",
+    "layout", "start_sec", "duration_sec", "fps", "sampled_at",
+]
+TRIAGE_FIELDS = [
+    "Frame_Filename", "Source_Clip", "Original_Video_Path", "Frame_Idx",
+    "Timestamp", "Bucket", "Triage_Status",
+]
+
+
+def _append_all_clips(csv_path: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    new = not csv_path.exists() or csv_path.stat().st_size == 0
+    with open(csv_path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=ALL_CLIPS_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerows(rows)
+
+
+def _derive_triage_batch_id(manifests_dir: Path, chamber: str, wave: str) -> str:
+    prefix = f"{chamber}_{wave}_{date.today().isoformat()}_batch"
+    n = 1
+    if manifests_dir.exists():
+        nums = []
+        for p in manifests_dir.iterdir():
+            if p.is_file() and p.suffix == ".csv" and p.stem.startswith(prefix):
+                try:
+                    nums.append(int(p.stem[len(prefix):]))
+                except ValueError:
+                    pass
+        if nums:
+            n = max(nums) + 1
+    return f"{prefix}{n:02d}"
+
+
+def materialise_selection(ctx, sel: pd.DataFrame, wave_id: str, fps: float) -> dict:
+    """PHASE 2: decode each selected frame from its remuxed video, perspective-
+    transform to the chamber target size, write a flat PNG, register one
+    virtual clip per source session in all_clips.csv, and emit a triage
+    manifest for 03_review_triage. Everything written is perspective-corrected."""
+    import cv2  # noqa: E402
+    from avistrack.core.transformer import PerspectiveTransformer  # noqa: E402
+    from avistrack.core import rois as roi_utils  # noqa: E402
+
+    chamber = ctx.chamber.chamber_id
+    ts = ctx.workspace.chamber.target_size
+    target_size = tuple(ts) if ts else (640, 640)
+
+    # session -> remuxed video path
+    vids = {}
+    for vp in ctx.list_videos(modality="rgb"):
+        m = SESSION_RE.search(vp.name)
+        if m:
+            vids[m.group(1)] = vp
+
+    frame_dir = ctx.frame_dir
+    frame_dir.mkdir(parents=True, exist_ok=True)
+
+    all_clips_rows, triage_rows = [], []
+    n_written = n_fail = 0
+    for session, g in sel.groupby("source_video", sort=True):
+        vp = vids.get(session)
+        if vp is None:
+            print(f"  ! no video for session {session}; skipping {len(g)} frame(s)")
+            n_fail += len(g); continue
+        corners = roi_utils.resolve_corners(ctx.metadata_dir, vp.name)
+        if not corners:
+            print(f"  ! no corners for {vp.name}; skipping {len(g)} frame(s)")
+            n_fail += len(g); continue
+        tf = PerspectiveTransformer(corners, target_size)
+        virtual_stem = f"{chamber}_{wave_id}_{session}_sel_transformed"
+        cap = cv2.VideoCapture(str(vp))
+        if not cap.isOpened():
+            print(f"  ! cannot open {vp}; skipping {len(g)} frame(s)")
+            n_fail += len(g); cap.release(); continue
+        for _, r in g.sort_values("frame").iterrows():
+            fi = int(r["frame"])
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                n_fail += 1; continue
+            warped = tf.transform(frame)
+            fname = f"{virtual_stem}_f{fi:06d}.png"
+            cv2.imwrite(str(frame_dir / fname), warped)
+            triage_rows.append({
+                "Frame_Filename": fname,
+                "Source_Clip": f"{virtual_stem}.mp4",
+                "Original_Video_Path": str(vp),
+                "Frame_Idx": str(fi),
+                "Timestamp": f"{fi / fps:.3f}",
+                "Bucket": r["bucket"],
+                "Triage_Status": "pending",
+            })
+            n_written += 1
+        cap.release()
+        fr = g["frame"].astype(int)
+        all_clips_rows.append({
+            "clip_path": f"clips/{chamber}/{wave_id}/{virtual_stem}.mp4",
+            "chamber_id": chamber, "wave_id": wave_id,
+            "source_video": vp.name, "source_drive_uuid": ctx.chamber.drive_uuid,
+            "layout": ctx.wave.layout,
+            "start_sec": f"{fr.min() / fps:.2f}",
+            "duration_sec": f"{(fr.max() - fr.min()) / fps:.2f}",
+            "fps": f"{fps:.3f}",
+            "sampled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+
+    _append_all_clips(ctx.all_clips_csv, all_clips_rows)
+    manifests_dir = ctx.manifests_root / "triage"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    batch_id = _derive_triage_batch_id(manifests_dir, chamber, wave_id)
+    manifest_path = manifests_dir / f"{batch_id}.csv"
+    with open(manifest_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TRIAGE_FIELDS)
+        w.writeheader()
+        w.writerows(triage_rows)
+
+    return {"written": n_written, "failed": n_fail,
+            "virtual_clips": len(all_clips_rows),
+            "batch_id": batch_id, "manifest": manifest_path, "frames_dir": frame_dir}
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 def main():
@@ -221,6 +350,10 @@ def main():
                     help="Only print the candidate pool sizes; no selection")
     ap.add_argument("--out", type=Path, default=None,
                     help="Write the selection plan CSV here")
+    ap.add_argument("--materialize", action="store_true",
+                    help="PHASE 2: decode + perspective-warp + write the selected "
+                         "frames into the workspace (flat frames + all_clips.csv "
+                         "virtual clips + triage manifest)")
     args = ap.parse_args()
 
     sources_yaml = args.sources_yaml or args.workspace_yaml.with_name("sources.yaml")
@@ -257,9 +390,20 @@ def main():
                             "cx", "cy", "w", "h", "lum", "fdiff") if c in sel.columns]
         sel[cols].to_csv(args.out, index=False)
         print(f"\nPlan written -> {args.out}")
-    print("\nNext (PHASE 2, writes to workspace): materialise the plan — decode "
-          "each frame, perspective-transform to 640x640, register virtual clips "
-          "in all_clips.csv, write flat frames + triage manifest for 03_review_triage.")
+
+    if args.materialize:
+        print("\nMaterialising (decode -> perspective-warp 640x640 -> write) ...")
+        m = materialise_selection(ctx, sel, args.wave_id, stats["fps"])
+        print(f"  wrote {m['written']} frame(s); {m['failed']} failed; "
+              f"{m['virtual_clips']} virtual clip(s) registered")
+        print(f"  frames       : {m['frames_dir']}")
+        print(f"  triage batch : {m['batch_id']}  ->  {m['manifest']}")
+        print(f"\nNext: python tools/03_review_triage.py --workspace-yaml <ws> "
+              f"--sources-yaml <src> --chamber-id {args.chamber_id} "
+              f"--wave-id {args.wave_id} --batch {m['batch_id']}")
+    else:
+        print("\nNext (PHASE 2, writes to workspace): re-run with --materialize to "
+              "decode + warp 640x640 + write frames + all_clips.csv + triage manifest.")
 
 
 if __name__ == "__main__":
