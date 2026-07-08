@@ -213,7 +213,7 @@ def _print_next_steps(ctx: ChamberWaveContext, target: Path) -> None:
     print(f"         --wave-id    {ctx.wave.wave_id}")
     print()
     print("  3. Sample clips:")
-    print(f"     python tools/sample_clips.py \\")
+    print(f"     python tools/01a_sample_clips.py \\")
     print(f"         --workspace-yaml {ctx.workspace_chamber_dir / 'workspace.yaml'} \\")
     print(f"         --chamber-id {ctx.chamber.chamber_id} \\")
     print(f"         --wave-id    {ctx.wave.wave_id}")

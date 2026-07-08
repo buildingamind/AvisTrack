@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tools/review_triage.py
+tools/03_review_triage.py
 ──────────────────────
 cv2 single-frame triage UI for approving / rejecting extracted frames before
 sending them to CVAT.
@@ -8,7 +8,7 @@ sending them to CVAT.
 Two modes
 ---------
 **Workspace mode** (recommended, multi-chamber architecture):
-    python tools/review_triage.py \\
+    python tools/03_review_triage.py \\
         --workspace-yaml /path/to/workspace.yaml \\
         --chamber-id vr_105A --wave-id wave3 \\
         --batch vr_105A_wave3_2026-05-01_batch01
@@ -18,7 +18,7 @@ Two modes
   Rejects (on finalize) → ``{workspace}/frames/{chamber}/{wave}/_rejected/``
 
 **Legacy --config mode**:
-    python tools/review_triage.py \\
+    python tools/03_review_triage.py \\
         --config configs/VR/wave3_vr.yaml \\
         --split  train --batch <batch_id>
 

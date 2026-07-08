@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tools/extract_frames.py
+tools/02_extract_frames.py
 ───────────────────────
 Extract a fixed number of evenly-spaced frames from each sampled clip, then
 prune near-duplicate frames batch-wide via perceptual hashing (dHash). Each
@@ -10,20 +10,20 @@ kept frame is written as PNG and registered in a triage manifest with
 Two modes
 ---------
 **Workspace mode** (recommended, multi-chamber architecture):
-    python tools/extract_frames.py \\
+    python tools/02_extract_frames.py \\
         --workspace-yaml /path/to/workspace.yaml \\
         --chamber-id vr_105A --wave-id wave3 \\
         --target-frames 100              # exact final count (recommended)
 
     # or, legacy fixed-density mode:
-    python tools/extract_frames.py ... --frames-per-clip 5 --hash-threshold 5
+    python tools/02_extract_frames.py ... --frames-per-clip 5 --hash-threshold 5
 
   Reads clips from   ``{workspace}/clips/{chamber}/{wave}/*.mp4``
   Writes PNGs to     ``{workspace}/frames/{chamber}/{wave}/{clip_stem}_f{idx:06d}.png``
   Writes manifest to ``{workspace}/manifests/triage/{batch_id}.csv``
 
 **Legacy --config mode** (single-drive layout, kept for old waves):
-    python tools/extract_frames.py \\
+    python tools/02_extract_frames.py \\
         --config configs/VR/wave3_vr.yaml \\
         --split  train --frames-per-clip 5 --hash-threshold 5
 
@@ -370,12 +370,12 @@ def main():
         print(f"\n✅ Extracted {n_extracted}; dedup dropped {n_dedup}; kept {n_kept}.")
     print(f"\nNext step:")
     if mode_info["mode"] == "workspace":
-        print(f"  python tools/review_triage.py \\")
+        print(f"  python tools/03_review_triage.py \\")
         print(f"      --workspace-yaml {args.workspace_yaml} \\")
         print(f"      --chamber-id {args.chamber_id} --wave-id {args.wave_id} \\")
         print(f"      --batch {batch_id}")
     else:
-        print(f"  python tools/review_triage.py --batch {batch_id} --split {args.split} --config {args.config}")
+        print(f"  python tools/03_review_triage.py --batch {batch_id} --split {args.split} --config {args.config}")
 
 
 if __name__ == "__main__":

@@ -6,9 +6,9 @@ context: "which workspace, which chamber drive, which wave, where do
 clips/ go, where do annotations/ go, where is camera_rois.json on the
 drive". This module produces that bundle and is shared by
 
-* ``tools/sample_clips.py``       – Step C
+* ``tools/01a_sample_clips.py``       – Step C
 * ``tools/scan_legacy_wave.py``   – Step F
-* ``tools/build_dataset.py``      – Step D (read-side)
+* ``tools/05_build_dataset.py``      – Step D (read-side)
 * ``cli/run_batch.py``            – Step G
 
 The resolver accepts already-loaded ``WorkspaceConfig`` / ``SourcesConfig``
@@ -167,7 +167,7 @@ class ChamberWaveContext:
     def timestamp_calibration_file(self) -> Path:
         """ChamberBroadcaster's capture-time timestamp log (jsonl). Preferred
         source for frame<->wall-clock mapping over the legacy OCR
-        time_calibration.json (see tools/sample_clips.py)."""
+        time_calibration.json (see tools/01a_sample_clips.py)."""
         return self.metadata_dir / "timestamp_calibration.jsonl"
 
     @property

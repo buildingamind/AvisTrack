@@ -1,5 +1,5 @@
 """
-tests/test_sample_clips.py – pure helpers in tools/sample_clips.py.
+tests/test_sample_clips.py – pure helpers in tools/01a_sample_clips.py.
 
 The full sampling driver needs cv2 + real videos and is exercised by a
 manual smoke test on the wave2 chamber drive (Step C verification in
@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _import_sample_clips():
-    """Load tools/sample_clips.py, stubbing cv2 only if it's truly missing.
+    """Load tools/01a_sample_clips.py, stubbing cv2 only if it's truly missing.
 
     A blanket stub would leak into other test modules (e.g.
     test_transformer.py) and break them, so we only install the stub when
@@ -33,7 +33,7 @@ def _import_sample_clips():
         import cv2  # noqa: F401
     except ModuleNotFoundError:
         sys.modules["cv2"] = types.ModuleType("cv2")
-    path = REPO_ROOT / "tools" / "sample_clips.py"
+    path = REPO_ROOT / "tools" / "01a_sample_clips.py"
     spec = importlib.util.spec_from_file_location("sample_clips_under_test", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

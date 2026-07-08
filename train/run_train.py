@@ -115,7 +115,7 @@ def _resolve_workspace(exp: ExperimentConfig,
     if not data_yaml.exists():
         raise SystemExit(
             f"data.yaml not found at {data_yaml}. Build the dataset first:\n"
-            f"  python tools/build_dataset.py --workspace-yaml {ws_path} "
+            f"  python tools/05_build_dataset.py --workspace-yaml {ws_path} "
             f"--recipe <recipe.yaml>"
         )
 

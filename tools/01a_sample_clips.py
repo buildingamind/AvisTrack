@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tools/sample_clips.py
+tools/01a_sample_clips.py
 ──────────────────────
 Sample short clips from a (chamber_id, wave_id)'s raw videos into the
 chamber-type workspace.
@@ -12,7 +12,7 @@ Refactored for the multi-chamber storage layout (improve-plan.md §1):
 * every clip is appended to ``manifests/all_clips.csv`` – the single
   source-of-truth for what has been sampled across all splits.
 * per-split manifests are gone; splits are decided later by recipes
-  consumed by ``tools/build_dataset.py``.
+  consumed by ``tools/05_build_dataset.py``.
 
 The sampling logic itself is unchanged: weighted by frame count,
 ``--min-gap`` enforced between clips of the same source video,
@@ -21,7 +21,7 @@ PerspectiveTransformer applied unless ``--no-transform`` is passed.
 
 Usage
 -----
-    python tools/sample_clips.py \\
+    python tools/01a_sample_clips.py \\
         --workspace-yaml /media/ssd/avistrack/collective/workspace.yaml \\
         --chamber-id     collective_104A \\
         --wave-id        wave2 \\

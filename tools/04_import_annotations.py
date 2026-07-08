@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tools/import_annotations.py
+tools/04_import_annotations.py
 ───────────────────────────
 Import a CVAT YOLO 1.1 export into the workspace.
 
@@ -28,7 +28,7 @@ moves frames, it only writes annotations next to existing frames.
 
 Usage::
 
-    python tools/import_annotations.py \\
+    python tools/04_import_annotations.py \\
         --workspace-yaml /media/ssd/avistrack/vr/workspace.yaml \\
         --cvat-project-zip /tmp/cvat_export_proj6.zip \\
         --cvat-project-id 6 \\
@@ -37,7 +37,7 @@ Usage::
 **Per-clip mode** (legacy, kept for backwards compatibility) imports a
 single CVAT task whose images all belong to one clip::
 
-    python tools/import_annotations.py \\
+    python tools/04_import_annotations.py \\
         --workspace-yaml /media/ssd/avistrack/collective/workspace.yaml \\
         --chamber-id collective_104A \\
         --wave-id    wave2 \\
@@ -50,7 +50,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import re
 import shutil
 import sys
 import zipfile
@@ -65,13 +64,11 @@ if str(REPO_ROOT) not in sys.path:
 from avistrack.config import load_workspace  # noqa: E402
 from avistrack.config.loader import load_sources  # noqa: E402
 from avistrack.config.schema import SourcesConfig  # noqa: E402
+from avistrack.annotations import parse_frame_name  # noqa: E402
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 META_FILENAME = "_meta.json"
 OBJ_NAMES_FILENAME = "obj.names"
-
-# CVAT YOLO export uses _fNNNNNN as the per-clip frame index suffix.
-FRAME_SUFFIX_RE = re.compile(r"^(.*)_f\d{6}$")
 
 ANNOTATION_BATCHES_CSV = "annotation_batches.csv"
 ANNOTATION_BATCHES_FIELDS = [
@@ -252,40 +249,6 @@ def import_one_clip(
 
 
 # ── CVAT-project mode ────────────────────────────────────────────────────
-
-def parse_frame_name(stem: str, sources: SourcesConfig) -> tuple[str, str, str]:
-    """
-    Parse a CVAT frame stem like
-    ``vr_105A_wave3_1_Wave3_VRChamber_..._s11645_transformed_f000044`` into
-    ``(chamber_id, wave_id, clip_stem)``.
-
-    Strategy: every (chamber_id, wave_id) registered in sources.yaml is
-    tested as a prefix on ``stem``. The longest matching prefix wins —
-    necessary because wave_ids contain underscores ("wave3", "wave3_1",
-    "wave3_negsample") and a naive split would mis-attribute.
-    """
-    m = FRAME_SUFFIX_RE.match(stem)
-    if not m:
-        raise ValueError(
-            f"frame {stem!r}: expected '..._fNNNNNN' suffix from extract_frames.py"
-        )
-    clip_with_chamber = m.group(1)
-
-    candidates: list[tuple[str, str, int]] = []
-    for ch in sources.chambers:
-        for wv in ch.waves:
-            prefix = f"{ch.chamber_id}_{wv.wave_id}_"
-            if clip_with_chamber.startswith(prefix):
-                candidates.append((ch.chamber_id, wv.wave_id, len(prefix)))
-    if not candidates:
-        raise ValueError(
-            f"frame {stem!r}: no (chamber_id, wave_id) pair from sources.yaml "
-            f"matches as a prefix"
-        )
-    candidates.sort(key=lambda x: -x[2])  # longest prefix wins
-    chamber_id, wave_id, _ = candidates[0]
-    return chamber_id, wave_id, clip_with_chamber
-
 
 def derive_annotation_batch_id(manifests_root: Path, chamber_type: str) -> str:
     """``{chamber_type}_{YYYY-MM-DD}_batch{NN}``, NN auto-incremented from

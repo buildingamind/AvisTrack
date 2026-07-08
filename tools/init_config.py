@@ -595,7 +595,7 @@ def _run_gui(prefill_root: str | None = None, prefill_name: str | None = None):
             f"✓ Written to:\n{out_path}\n{warn_text}\n\n"
             f"Next steps:\n"
             f"1. python tools/pick_rois.py ...\n"
-            f"2. python tools/sample_clips.py --config {out_path} ...\n"
+            f"2. python tools/01a_sample_clips.py --config {out_path} ...\n"
             f"3. python cli/run_batch.py --config {out_path}"
         )
         status_bar.config(text=f"✓ Saved → {out_path}", foreground=OK_GREEN)
@@ -780,7 +780,7 @@ def _run_cli(prefill_root=None, prefill_name=None, output_path=None):
     out.write_text(_generate_yaml(cfg))
     print(f"  {GREEN}✓ Config written to {out}{RESET}")
     print(f"\n{BOLD}Next steps:{RESET}")
-    print(f"  python tools/sample_clips.py --config {out} --split train --n 20 --duration 3 ...")
+    print(f"  python tools/01a_sample_clips.py --config {out} --split train --n 20 --duration 3 ...")
     print(f"  python cli/run_batch.py --config {out}\n")
 
 

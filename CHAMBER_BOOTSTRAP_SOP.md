@@ -74,25 +74,25 @@ python tools/pick_rois.py validate `
 # ── Image-based annotation flow (frames → CVAT) ──
 
 # 7. Sample clips from the wave (provenance unit)
-python tools/sample_clips.py `
+python tools/01a_sample_clips.py `
     --workspace-yaml ... --chamber-id ... --wave-id ... `
     --modality rgb --n 20 --duration 3 --min-gap 5
 
 # 8. Extract PNG frames per clip
-python tools/extract_frames.py `
+python tools/02_extract_frames.py `
     --workspace-yaml ... --chamber-id ... --wave-id ... `
     --frames-per-clip 5 --hash-threshold 5
 # Prints batch_id, e.g. vr_105A_wave3_1_2026-05-01_batch01
 
 # 9. Triage (browser GUI)
-python tools/review_triage.py `
+python tools/03_review_triage.py `
     --workspace-yaml ... --chamber-id ... --wave-id ... `
     --batch <batch_id>
 # http://localhost:5000
 # Keys: a/→ approve, x/← reject, z undo, space next-pending, Ctrl-S save
 
 # 10. Upload approved frames to CVAT, annotate, export YOLO txt, then:
-python tools/import_annotations.py `
+python tools/04_import_annotations.py `
     --workspace-yaml ... --cvat-export ./export.zip
 ```
 

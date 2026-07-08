@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tools/build_dataset.py
+tools/05_build_dataset.py
 ──────────────────────
 Materialise one ``datasets/{recipe.name}/`` view from a chamber-type
 workspace's ``clips/`` + ``frames/`` (flat) + ``annotations/`` (flat-batch)
@@ -33,7 +33,7 @@ Output layout (Ultralytics-compatible)::
 
 Usage
 -----
-    python tools/build_dataset.py \\
+    python tools/05_build_dataset.py \\
         --workspace-yaml /media/.../vr/workspace.yaml \\
         --recipe         configs/VR/recipe_pre-w4_vr_2026-05-02.yaml
 """
@@ -58,7 +58,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from avistrack.config import RecipeConfig, load_recipe, load_workspace  # noqa: E402
 from avistrack.config.loader import load_sources  # noqa: E402
-from tools.import_annotations import parse_frame_name  # noqa: E402
+from avistrack.annotations import parse_frame_name  # noqa: E402
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
 SPLITS = ("train", "val", "test")
