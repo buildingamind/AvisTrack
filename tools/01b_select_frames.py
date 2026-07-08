@@ -327,6 +327,91 @@ def materialise_selection(ctx, sel: pd.DataFrame, wave_id: str, fps: float) -> d
             "batch_id": batch_id, "manifest": manifest_path, "frames_dir": frame_dir}
 
 
+# ── Novelty bucket (embedding distance vs a reference set) ─────────────────
+#
+# Unlike dup/lowconf/miss/coverage (free from the parquet), novelty needs
+# pixels: it decodes + perspective-warps a shortlist of coverage frames,
+# embeds them with the same model that produced the reference embeddings,
+# and keeps the frames least similar to anything already in the dataset.
+
+def _decode_warp_frames(ctx, sub: pd.DataFrame):
+    """Yield (row_index, warped_bgr_640) for each row in ``sub`` (needs
+    source_video + frame). Same decode+warp path as materialise."""
+    import cv2  # noqa: E402
+    from avistrack.core.transformer import PerspectiveTransformer  # noqa: E402
+    from avistrack.core import rois as roi_utils  # noqa: E402
+
+    ts = ctx.workspace.chamber.target_size
+    target_size = tuple(ts) if ts else (640, 640)
+    vids = {}
+    for vp in ctx.list_videos(modality="rgb"):
+        m = SESSION_RE.search(vp.name)
+        if m:
+            vids[m.group(1)] = vp
+    for session, g in sub.groupby("source_video", sort=True):
+        vp = vids.get(session)
+        if vp is None:
+            continue
+        corners = roi_utils.resolve_corners(ctx.metadata_dir, vp.name)
+        if not corners:
+            continue
+        tf = PerspectiveTransformer(corners, target_size)
+        cap = cv2.VideoCapture(str(vp))
+        if not cap.isOpened():
+            cap.release(); continue
+        for idx, r in g.sort_values("frame").iterrows():
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(r["frame"]))
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                yield idx, tf.transform(frame)
+        cap.release()
+
+
+def select_novelty(ctx, df: pd.DataFrame, quota: int, ref_emb_path: Path,
+                   yolo_weights: Path, lowconf_thresh: float, min_frame_gap: int,
+                   seed: int, shortlist_factor: int = 10,
+                   shortlist_cap: int = 2000) -> pd.DataFrame:
+    """Pick the ``quota`` coverage frames most novel vs the reference
+    embeddings (novelty = 1 - max cosine similarity). Decodes + warps +
+    embeds a bounded shortlist so cost stays proportional to the quota."""
+    import numpy as np
+
+    ref = np.load(str(ref_emb_path)).astype("float32")
+    ref = ref / (np.linalg.norm(ref, axis=1, keepdims=True) + 1e-8)
+
+    d = df.copy()
+    d["bucket"] = label_buckets(d, lowconf_thresh)
+    pool = d[d["bucket"] == "coverage"].copy()
+    if pool.empty:
+        return pool.assign(novelty=[])
+    pool["score"] = 0.0
+    n_short = min(len(pool), max(quota * shortlist_factor, quota), shortlist_cap)
+    shortlist = temporal_dedup(pool.sample(n=n_short, random_state=seed), min_frame_gap)
+
+    imgs, idxs = [], []
+    for idx, warped in _decode_warp_frames(ctx, shortlist):
+        imgs.append(warped)
+        idxs.append(idx)
+    if not imgs:
+        return pool.iloc[0:0].assign(novelty=[])
+
+    from ultralytics import YOLO
+    model = YOLO(str(yolo_weights))
+    embs = []
+    B = 64
+    for i in range(0, len(imgs), B):
+        for t in model.embed(imgs[i:i + B], verbose=False):
+            embs.append(t.detach().cpu().numpy().astype("float32").ravel())
+    E = np.stack(embs)
+    E = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-8)
+    novelty = 1.0 - (E @ ref.T).max(axis=1)
+
+    res = df.loc[idxs].copy()
+    res["bucket"] = "novelty"
+    res["novelty"] = novelty
+    return res.sort_values("novelty", ascending=False).head(quota)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 def main():
@@ -345,6 +430,13 @@ def main():
     ap.add_argument("--n-lowconf",  type=int, default=0)
     ap.add_argument("--n-miss",     type=int, default=0)
     ap.add_argument("--n-coverage", type=int, default=0)
+    ap.add_argument("--n-novelty",  type=int, default=0,
+                    help="Novelty frames (embedding distance vs --ref-emb); needs "
+                         "--ref-emb + --yolo-weights (decodes + embeds a shortlist)")
+    ap.add_argument("--ref-emb", type=Path, default=None,
+                    help="Reference embeddings .npy (L2-normalized rows) for novelty")
+    ap.add_argument("--yolo-weights", type=Path, default=None,
+                    help="Model .pt to embed candidate frames (must match --ref-emb)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--report-only", action="store_true",
                     help="Only print the candidate pool sizes; no selection")
@@ -379,15 +471,27 @@ def main():
     sel = select_candidates(df, quotas, args.lowconf_thresh,
                             args.min_frame_gap, args.seed)
 
+    if args.n_novelty > 0:
+        if not args.ref_emb or not args.yolo_weights:
+            raise SystemExit("--n-novelty requires --ref-emb and --yolo-weights")
+        print(f"\nComputing novelty bucket ({args.n_novelty}) — decode + embed shortlist ...")
+        nov = select_novelty(ctx, df, args.n_novelty, args.ref_emb,
+                             args.yolo_weights, args.lowconf_thresh,
+                             args.min_frame_gap, args.seed)
+        sel = pd.concat([sel, nov])
+        # novelty draws from the coverage pool; drop any frame picked twice
+        sel = sel.drop_duplicates(subset=["source_video", "frame"], keep="first")
+    quotas["novelty"] = args.n_novelty
+
     print(f"\nSelected {len(sel)} frame(s):")
-    for k in BUCKETS:
+    for k in (*BUCKETS, "novelty"):
         n = int((sel["bucket"] == k).sum())
         if quotas.get(k, 0) or n:
             print(f"  {k:9s}: {n:>6} / quota {quotas.get(k, 0)}")
 
     if args.out:
         cols = [c for c in ("source_video", "frame", "bucket", "conf", "n_det",
-                            "cx", "cy", "w", "h", "lum", "fdiff") if c in sel.columns]
+                            "cx", "cy", "w", "h", "lum", "fdiff", "novelty") if c in sel.columns]
         sel[cols].to_csv(args.out, index=False)
         print(f"\nPlan written -> {args.out}")
 
