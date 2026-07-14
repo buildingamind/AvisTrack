@@ -66,8 +66,9 @@ differ by a letter suffix (`01a`, `01b`).
 | `03_review_triage.py` | triage | Interactive keep/drop of candidate frames; rejects move to `_rejected/`. |
 | `04_import_annotations.py` | import | CVAT project zip → flat `annotations/{batch_id}/` + `annotation_batches.csv`. |
 | `05_build_dataset.py` | build | Recipe → immutable `datasets/{name}/` view (images/labels + manifest + frozen recipe). |
-| `06_train.py` | train | *(wraps `train/run_pipeline.py`)* multi-model bakeoff + lineage snapshot. |
-| `07_eval.py` | eval | *(wraps `eval/run_eval.py`)* evaluate on test split, select champion. |
+| `train/run_train.py` | train | Reads an experiment YAML (`chamber_type`/`experiment_name`/`dataset_name`/`phase`/`runs`); trains each candidate → `phase{N}/{run}/`; writes `meta.json` + `snapshots/` lineage on first launch. (The numbered `06_train.py` wrapper was never built — this is the real entry point.) |
+| `eval/select_champion.py` | select | Evaluates every `phase{N}/{run}/` on the **test** split (ultralytics `val`), writes `phase{N}/test_eval.csv`, selects the champion by `mAP50-95` + speed tiebreak (pure logic in `avistrack/champion.py`) → `final/{best.pt, best.onnx, champion.meta.json}`. Reproduces the pre-w4 convention. |
+| `eval/run_eval.py` | eval | Single-model eval: mode A legacy clip-MOT tracking eval; mode B workspace YOLO `val` → `models/{exp}/eval/{ds}/`. |
 
 > **Naming constraint.** Python module names cannot start with a digit, so
 > `from tools.04_import_annotations import parse_frame_name` is a syntax
@@ -157,10 +158,17 @@ Consequences discovered 2026-07:
   from the prior version).
 - **Verification:** rebuilding the pre-w4 recipe over the existing workspace
   yields **633 frames split 507/62/64 — identical to the pre-w4 manifest**.
+- The **champion-selection tool hit the same fate, worse**: it produced
+  pre-w4's `phase1/test_eval.csv` + `final/champion.meta.json` but was
+  *neither committed nor captured in `uncommitted.diff`* (the snapshot is
+  taken at training start, before selection runs). It was **reconstructed
+  from the pre-w4 output format** and committed as `eval/select_champion.py`
+  (+ pure logic in `avistrack/champion.py`, tested in
+  `tests/test_champion.py`).
 
-Lesson: `06_train`/lineage snapshots (`uncommitted.diff`) are a real safety
-net, but the fix is to **commit dataset-assembly code**, which this work
-does.
+Lesson: lineage snapshots (`uncommitted.diff`) are a real safety net but only
+cover training-time state — the fix is to **commit the dataset-assembly and
+model-selection code**, which this work does.
 
 ---
 
