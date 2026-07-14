@@ -38,6 +38,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# Windows consoles default to cp1252; the emoji in status prints below would
+# raise UnicodeEncodeError. Make stdout/stderr utf-8 (replace on failure).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from avistrack import lineage as L                      # noqa: E402
 from avistrack.config.loader import load_workspace      # noqa: E402
 from avistrack.champion import select_champion          # noqa: E402
