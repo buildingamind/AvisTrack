@@ -58,11 +58,19 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from avistrack import valid_ranges as vrmod  # noqa: E402
-from avistrack.core.time_lookup import load_segment_starts  # noqa: E402
+from avistrack.core.time_lookup import load_segment_fps, load_segment_starts  # noqa: E402
 from avistrack.workspace import load_context  # noqa: E402
 
 BUCKETS = ("dup", "lowconf", "miss", "coverage")
 SESSION_RE = re.compile(r"(Day\d+_\d{6}_\d{4})")   # tracking parquet stem key
+
+# Two possible tracking outputs under 04_Tracking_RGB/ (see resolve_tracking_dir).
+TRACK_ALIGNED = "raw_aligned_30fps"
+TRACK_RAW = "raw"
+# Which frame of the SOURCE video each selected row must be decoded from. Kept
+# separate from "frame" because in the aligned output "frame" is a 30 fps tick,
+# not a source frame index.
+DECODE_COL = "decode_frame"
 
 
 # ── Signal → bucket ───────────────────────────────────────────────────────
@@ -91,6 +99,32 @@ def _bucket_score(df: pd.DataFrame, bucket: str) -> pd.Series:
 
 
 # ── Temporal de-duplication ───────────────────────────────────────────────
+
+def cross_bucket_dedup(sel: pd.DataFrame, min_gap: int) -> pd.DataFrame:
+    """Enforce ``min_gap`` ACROSS buckets, not just inside each one.
+
+    ``temporal_dedup`` runs per bucket, so a frame kept as ``lowconf`` and one
+    two frames later kept as ``miss`` both survive -- they are the same moment
+    and cost two annotations for one piece of information. Measured on VR
+    wave4: 6 such pairs in 167 selected frames (105A), 1 in 183 (105C).
+
+    On a collision the RARER bucket wins, so a scarce category is never
+    displaced by an abundant one.
+    """
+    if min_gap <= 0 or sel.empty:
+        return sel
+    priority = {"miss": 0, "lowconf": 1, "dup": 2, "novelty": 3, "coverage": 4}
+    sel = sel.assign(_p=sel["bucket"].map(lambda b: priority.get(b, 9)))
+    keep = []
+    for _video, g in sel.groupby("source_video", sort=False):
+        kept_frames: list[int] = []
+        for idx, frame in zip(g.sort_values("_p").index,
+                              g.sort_values("_p")["frame"].to_numpy()):
+            if all(abs(int(frame) - kf) >= min_gap for kf in kept_frames):
+                kept_frames.append(int(frame))
+                keep.append(idx)
+    return sel.loc[keep].drop(columns="_p")
+
 
 def temporal_dedup(sub: pd.DataFrame, min_gap: int) -> pd.DataFrame:
     """Greedily drop frames within ``min_gap`` frames of an already-kept
@@ -149,20 +183,78 @@ def select_candidates(
 
 # ── Load valid-range-filtered tracking for one (chamber, wave) ─────────────
 
+def _shrink(d: pd.DataFrame) -> pd.DataFrame:
+    """Halve the per-row footprint before the frames pile up.
+
+    A full VR chamber-wave is ~32.7 M valid rows at 80 bytes each = 2.6 GB, and
+    the pipeline holds several copies at once (concat, then `df.copy()` in
+    `select_candidates`). That overflowed on a 32 GB box. Measurements
+    (conf/cx/cy/w/h/lum/fdiff) do not need float64 -- they are 0-640 pixel
+    coordinates and 0-255 intensities.
+
+    `unix_time` MUST stay float64: it is a Unix epoch around 1.78e9, and
+    float32 carries ~7 significant digits, so storing it single-precision would
+    quantise the timestamp to ~100 s.
+    """
+    for c in ("conf", "cx", "cy", "w", "h", "lum", "fdiff"):
+        if c in d.columns and d[c].dtype == "float64":
+            d[c] = d[c].astype("float32")
+    for c in ("n_det", "frame", "src_frame", DECODE_COL):
+        if c in d.columns and d[c].dtype == "int64":
+            d[c] = d[c].astype("int32")
+    return d
+
+
+def resolve_tracking_dir(ctx) -> tuple[Path, str]:
+    """Choose which tracking output to select from: (dir, "aligned"|"raw").
+
+    ``raw_aligned_30fps/`` is the burn-in-clock-aligned resampling. Its
+    ``frame`` column is a TRUE 30 fps tick, so ``unix -> frame`` at 30 is exact,
+    and its ``src_frame`` column records which frame of the source video each
+    tick came from — which is what has to be decoded for annotation.
+
+    ``raw/`` is the tracker's un-resampled output: ``frame`` is a source frame
+    index advancing at the segment's own rate. That rate is NOT the chamber's
+    nominal fps — on VR chamber 105A it drifts from 29.9 to 39.0 fps, so
+    converting a valid-range instant with the nominal 30 puts the window edge
+    up to 23 % of a segment away from where it belongs (and silently discards
+    the tail of every segment). The raw path therefore needs the per-segment
+    rate from ``load_segment_fps``.
+
+    Aligned is preferred, but only when it actually carries ``src_frame``:
+    without it there is no route back to the source video. (Plus wave4's
+    aligned output predates that column, so it falls back to raw — harmless
+    there, since Plus really did record at 29.96–29.99 fps.)
+    """
+    base = ctx.wave_root / "04_Tracking_RGB"
+    aligned, raw = base / TRACK_ALIGNED, base / TRACK_RAW
+    if aligned.is_dir():
+        sample = sorted(aligned.glob("*.parquet"))[:1]
+        if sample:
+            cols = pd.read_parquet(sample[0]).columns
+            if "src_frame" in cols:
+                return aligned, "aligned"
+            print(f"  note: {aligned.name} has no 'src_frame' column — "
+                  f"falling back to {TRACK_RAW}/ with per-segment fps")
+    if not raw.is_dir():
+        raise SystemExit(f"tracking dir not found: {raw}")
+    return raw, "raw"
+
+
 def load_valid_tracking(ctx, modality: str = "rgb") -> tuple[pd.DataFrame, dict]:
     """Concatenate every session's tracking parquet, keeping only frames
     inside valid_ranges. Returns (df, stats). df has a 'source_video'
-    (session) column. valid_ranges filtering is mandatory."""
+    (session) column and a DECODE_COL column giving the source-video frame to
+    decode. valid_ranges filtering is mandatory."""
     vr = vrmod.load_valid_ranges(ctx.valid_ranges_file)
     if not vr:
         raise SystemExit(
             f"valid_ranges.json missing/empty at {ctx.valid_ranges_file}. "
             f"Valid-range filtering is mandatory for selection.")
     starts = load_segment_starts(ctx.timestamp_calibration_file)
-    fps = float(getattr(ctx.workspace.chamber, "fps", None) or 30.0)
-    trk = ctx.wave_root / "04_Tracking_RGB" / "raw"
-    if not trk.is_dir():
-        raise SystemExit(f"tracking dir not found: {trk}")
+    trk, kind = resolve_tracking_dir(ctx)
+    nominal = float(getattr(ctx.workspace.chamber, "fps", None) or 30.0)
+    seg_fps = {} if kind == "aligned" else load_segment_fps(ctx.timestamp_calibration_file)
 
     parts, n_vids, n_used = [], 0, 0
     for vp in ctx.list_videos(modality=modality):
@@ -177,22 +269,27 @@ def load_valid_tracking(ctx, modality: str = "rgb") -> tuple[pd.DataFrame, dict]
         if not tp.exists():
             continue
         df = pd.read_parquet(tp).copy()
+        # aligned: 'frame' is a 30 fps tick by construction.
+        # raw: 'frame' advances at the segment's own recorded rate.
+        fps = 30.0 if kind == "aligned" else seg_fps.get(V, nominal)
         n = int(df["frame"].max()) + 1
         wins = vrmod.frame_windows(vr[V], starts[V], fps, n)
         if not wins:
             continue
         d = df[vrmod.valid_mask(df["frame"].to_numpy(), wins)].copy()
+        d[DECODE_COL] = d["src_frame"] if kind == "aligned" else d["frame"]
         d["source_video"] = m.group(1)
-        parts.append(d)
+        parts.append(_shrink(d))
         n_used += 1
 
     if not parts:
         raise SystemExit(
             "no valid-range frames found — check valid_ranges.json, "
             "timestamp_calibration.jsonl (needs new_segment events), and the "
-            "04_Tracking_RGB/raw parquets.")
+            f"04_Tracking_RGB/{trk.name} parquets.")
     df = pd.concat(parts, ignore_index=True)
-    return df, {"videos": n_vids, "sessions_used": n_used, "fps": fps}
+    return df, {"videos": n_vids, "sessions_used": n_used,
+                "fps": nominal, "tracking": trk.name, "kind": kind}
 
 
 def report_pools(df: pd.DataFrame, lowconf_thresh: float) -> dict[str, int]:
@@ -280,8 +377,12 @@ def materialise_selection(ctx, sel: pd.DataFrame, wave_id: str, fps: float) -> d
         if not cap.isOpened():
             print(f"  ! cannot open {vp}; skipping {len(g)} frame(s)")
             n_fail += len(g); cap.release(); continue
-        for _, r in g.sort_values("frame").iterrows():
-            fi = int(r["frame"])
+        # Decode by SOURCE frame, never by the (possibly resampled) 'frame'.
+        # Two 30 fps ticks can land on one source frame when the segment ran
+        # slower than 30; dedup so the PNG names stay unique.
+        g = g.drop_duplicates(subset=[DECODE_COL])
+        for _, r in g.sort_values(DECODE_COL).iterrows():
+            fi = int(r[DECODE_COL])
             cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -294,13 +395,15 @@ def materialise_selection(ctx, sel: pd.DataFrame, wave_id: str, fps: float) -> d
                 "Source_Clip": f"{virtual_stem}.mp4",
                 "Original_Video_Path": str(vp),
                 "Frame_Idx": str(fi),
+                # the container is CFR nominal-30, so source_frame/30 is exactly
+                # where a player scrubs to
                 "Timestamp": f"{fi / fps:.3f}",
                 "Bucket": r["bucket"],
                 "Triage_Status": "pending",
             })
             n_written += 1
         cap.release()
-        fr = g["frame"].astype(int)
+        fr = g[DECODE_COL].astype(int)
         all_clips_rows.append({
             "clip_path": f"clips/{chamber}/{wave_id}/{virtual_stem}.mp4",
             "chamber_id": chamber, "wave_id": wave_id,
@@ -359,8 +462,8 @@ def _decode_warp_frames(ctx, sub: pd.DataFrame):
         cap = cv2.VideoCapture(str(vp))
         if not cap.isOpened():
             cap.release(); continue
-        for idx, r in g.sort_values("frame").iterrows():
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(r["frame"]))
+        for idx, r in g.sort_values(DECODE_COL).iterrows():
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(r[DECODE_COL]))
             ok, frame = cap.read()
             if ok and frame is not None:
                 yield idx, tf.transform(frame)
@@ -424,6 +527,14 @@ def main():
     ap.add_argument("--wave-id", required=True)
     ap.add_argument("--modality", default="rgb", choices=["rgb", "ir"])
     ap.add_argument("--lowconf-thresh", type=float, default=0.4)
+    ap.add_argument("--min-lum", type=float, default=0.0,
+                    help="Drop frames dimmer than this before selecting. A frame a "
+                         "human cannot annotate is not a training example, however "
+                         "informative the model's failure on it is. On VR chamber 105A "
+                         "the `miss` pool is 96.9%% frames with lum<10 -- the ~3 s "
+                         "stimulus darkenings, which are pure black; but 639 of them "
+                         "sit above lum 10, and those are genuine misses in normal "
+                         "light. 0 disables the floor.")
     ap.add_argument("--min-frame-gap", type=int, default=15,
                     help="Min frames between selected frames of the same session")
     ap.add_argument("--n-dup",      type=int, default=0)
@@ -454,10 +565,18 @@ def main():
         chamber_id=args.chamber_id, wave_id=args.wave_id, require_drive=True)
 
     df, stats = load_valid_tracking(ctx, modality=args.modality)
+    if args.min_lum > 0 and "lum" in df.columns:
+        n0 = len(df)
+        df = df[df["lum"].to_numpy() >= args.min_lum]
+        print(f"  --min-lum {args.min_lum:g}: dropped {n0-len(df):,} of {n0:,} frames "
+              f"as too dark to annotate")
+        if df.empty:
+            raise SystemExit("--min-lum removed every frame")
     pools = report_pools(df, args.lowconf_thresh)
 
     print(f"{args.chamber_id}/{args.wave_id}: {len(df):,} valid-range frames "
           f"from {stats['sessions_used']}/{stats['videos']} session(s), fps={stats['fps']:g}")
+    print(f"  tracking source: 04_Tracking_RGB/{stats['tracking']} ({stats['kind']})")
     print(f"Candidate pools (lowconf<{args.lowconf_thresh}):")
     for k in BUCKETS:
         print(f"  {k:9s}: {pools[k]:>10,}")
@@ -483,6 +602,13 @@ def main():
         sel = sel.drop_duplicates(subset=["source_video", "frame"], keep="first")
     quotas["novelty"] = args.n_novelty
 
+    n_before = len(sel)
+    sel = cross_bucket_dedup(sel, args.min_frame_gap).sort_values(
+        ["source_video", "frame"])
+    if len(sel) < n_before:
+        print(f"\ncross-bucket dedup: dropped {n_before - len(sel)} frame(s) within "
+              f"{args.min_frame_gap} frames of a higher-priority pick")
+
     print(f"\nSelected {len(sel)} frame(s):")
     for k in (*BUCKETS, "novelty"):
         n = int((sel["bucket"] == k).sum())
@@ -490,7 +616,7 @@ def main():
             print(f"  {k:9s}: {n:>6} / quota {quotas.get(k, 0)}")
 
     if args.out:
-        cols = [c for c in ("source_video", "frame", "bucket", "conf", "n_det",
+        cols = [c for c in ("source_video", "frame", DECODE_COL, "bucket", "conf", "n_det",
                             "cx", "cy", "w", "h", "lum", "fdiff", "novelty") if c in sel.columns]
         sel[cols].to_csv(args.out, index=False)
         print(f"\nPlan written -> {args.out}")

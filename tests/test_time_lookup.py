@@ -179,3 +179,46 @@ class TestConstruction:
         r = repr(tl)
         assert "TimeLookup" in r
         assert "0–100" in r
+
+
+class TestLoadSegmentFps:
+    """The chamber's nominal fps is not the rate frames were captured at.
+
+    VR chamber 105A drifts 29.9 -> 39.0 fps across its wave4 recording, so the
+    per-segment rate has to come from the capture log, not workspace.yaml.
+    """
+
+    def _jsonl(self, tmp_path, events):
+        p = tmp_path / "timestamp_calibration.jsonl"
+        p.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+        return p
+
+    def test_prefers_frames_written_over_actual_fps(self, tmp_path):
+        from avistrack.core.time_lookup import load_segment_fps
+        p = self._jsonl(tmp_path, [{
+            "reason": "segment_close",
+            "video_file": "FRAGMENTED_Day1_A_RGB.mp4",
+            "frames_written": 140400, "wall_duration_s": 3600.0,
+            "expected_fps": 30.0, "actual_fps": 30.0,
+        }])
+        # FRAGMENTED_ stripped so the key matches the remuxed filename
+        assert load_segment_fps(p) == {"Day1_A_RGB.mp4": 39.0}
+
+    def test_falls_back_to_actual_fps(self, tmp_path):
+        from avistrack.core.time_lookup import load_segment_fps
+        p = self._jsonl(tmp_path, [{
+            "reason": "segment_close", "video_file": "v.mp4",
+            "wall_duration_s": 0, "actual_fps": 31.25,
+        }])
+        assert load_segment_fps(p) == {"v.mp4": 31.25}
+
+    def test_ignores_other_events_and_blank_lines(self, tmp_path):
+        from avistrack.core.time_lookup import load_segment_fps
+        p = tmp_path / "c.jsonl"
+        p.write_text(
+            json.dumps({"reason": "new_segment", "video_file": "v.mp4",
+                        "unix_s": 1.0}) + "\n\n"
+            + "not json\n"
+            + json.dumps({"reason": "segment_close", "video_file": "v.mp4",
+                          "frames_written": 3000, "wall_duration_s": 100.0}) + "\n")
+        assert load_segment_fps(p) == {"v.mp4": 30.0}

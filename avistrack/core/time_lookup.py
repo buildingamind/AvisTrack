@@ -237,3 +237,42 @@ def load_segment_starts(jsonl_path: str | Path) -> dict[str, float]:
                 vf = vf[len("FRAGMENTED_"):]
             starts.setdefault(vf, float(u))
     return starts
+
+
+def load_segment_fps(jsonl_path: str | Path) -> dict[str, float]:
+    """Parse ``timestamp_calibration.jsonl`` and return ``{video_basename:
+    true_fps}`` from its ``segment_close`` events.
+
+    The chamber's nominal fps (``workspace.yaml``) is NOT the rate at which
+    frames were actually captured. On VR chamber 105A the true rate drifts from
+    29.9 to 39.0 fps across the recording, so converting a wall-clock instant to
+    a frame index of the SOURCE video with the nominal 30 would misplace it by
+    up to 23 % of the segment. Prefer the recorded ``frames_written /
+    wall_duration_s``; fall back to the writer's own ``actual_fps``.
+
+    Not needed for ``raw_aligned_30fps`` output, whose ``frame`` column really
+    is a 30 fps tick — this is for reading the un-resampled ``raw`` parquets.
+    """
+    fps: dict[str, float] = {}
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("reason") != "segment_close":
+                continue
+            vf = ev.get("video_file")
+            if not vf:
+                continue
+            if vf.startswith("FRAGMENTED_"):
+                vf = vf[len("FRAGMENTED_"):]
+            n, dur = ev.get("frames_written"), ev.get("wall_duration_s")
+            if n and dur and float(dur) > 0:
+                fps.setdefault(vf, float(n) / float(dur))
+            elif ev.get("actual_fps"):
+                fps.setdefault(vf, float(ev["actual_fps"]))
+    return fps
