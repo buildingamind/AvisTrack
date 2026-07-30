@@ -366,3 +366,49 @@ def test_evr_workspace_partial_args_rejected(tmp_path: Path):
     args = _ns_evr(workspace_yaml=str(w))  # no chamber/wave
     with pytest.raises(SystemExit):
         edit_valid_ranges._resolve_paths(args)
+
+
+class TestSplitListFallback:
+    """CVAT export without images: the frame list must come from train.txt.
+
+    `04_import_annotations` keys on the set of images to decide what a missing
+    .txt means -- listed with no label = annotated empty = a NEGATIVE sample;
+    not listed = never in the task. Exporting without pixels (they already live
+    in frames/) removes the images, so that set has to come from the split
+    lists or the distinction is lost.
+    """
+
+    def _load(self):
+        import importlib.util, sys
+        from pathlib import Path
+        p = Path(__file__).resolve().parent.parent / "tools" / "04_import_annotations.py"
+        spec = importlib.util.spec_from_file_location("imp_ann", p)
+        m = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = m
+        spec.loader.exec_module(m)
+        return m
+
+    def test_reads_stems_from_train_txt(self, tmp_path):
+        m = self._load()
+        d = tmp_path / "obj_train_data"
+        d.mkdir()
+        (tmp_path / "train.txt").write_text(
+            "obj_train_data/a_f000001.png\nobj_train_data/b_f000002.png\n")
+        assert m.stems_from_split_lists(tmp_path) == {
+            "a_f000001": "a_f000001.png", "b_f000002": "b_f000002.png"}
+
+    def test_merges_all_splits_and_ignores_blanks(self, tmp_path):
+        m = self._load()
+        (tmp_path / "train.txt").write_text("obj_train_data/a.png\n\n")
+        (tmp_path / "val.txt").write_text("obj_train_data/b.png\n")
+        (tmp_path / "test.txt").write_text("obj_train_data/c.png\n")
+        assert set(m.stems_from_split_lists(tmp_path)) == {"a", "b", "c"}
+
+    def test_handles_backslash_paths(self, tmp_path):
+        m = self._load()
+        (tmp_path / "train.txt").write_text(r"obj_train_data\win_f000003.png" + "\n")
+        assert set(m.stems_from_split_lists(tmp_path)) == {"win_f000003"}
+
+    def test_empty_when_no_lists(self, tmp_path):
+        m = self._load()
+        assert m.stems_from_split_lists(tmp_path) == {}

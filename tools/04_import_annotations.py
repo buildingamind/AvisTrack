@@ -141,6 +141,27 @@ def discover_pairs(source_dir: Path) -> tuple[list[Path], list[Path], list[str]]
     return images, labels, orphans
 
 
+def stems_from_split_lists(root: Path) -> dict[str, str]:
+    """``{stem: original filename}`` from YOLO 1.1's train/val/test.txt.
+
+    Those files list one image path per line (``obj_train_data/<name>.png``) and
+    CVAT writes them whether or not the export carries the pixels. They are what
+    preserves the DISTINCTION that matters on import: a stem listed here with no
+    ``.txt`` beside it was annotated as empty (a negative sample), whereas a
+    stem absent from the list was never in the task at all. Without the list the
+    two are indistinguishable.
+    """
+    out: dict[str, str] = {}
+    for name in ("train.txt", "val.txt", "test.txt"):
+        for p in root.rglob(name):
+            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip().replace("\\", "/")
+                if not line:
+                    continue
+                out.setdefault(Path(line).stem, Path(line).name)
+    return out
+
+
 def read_obj_names(source_dir: Path) -> list[str]:
     """Read CVAT's obj.names if present."""
     f = source_dir / OBJ_NAMES_FILENAME
@@ -329,7 +350,20 @@ def import_cvat_project_zip(
                 labels_by_stem.setdefault(p.stem, p)
 
         if not images_by_stem:
-            raise SystemExit(f"no image files found inside {source_zip}")
+            # CVAT's "Save images" was off. The pixels are already in frames/,
+            # so round-tripping ~180 MB of images we own is pure waste. Take the
+            # frame list from the split lists instead; the loop below resolves
+            # every stem against frames/ and hard-errors on any that is missing,
+            # so a wrong or stale list cannot pass silently.
+            listed = stems_from_split_lists(tmp_extract)
+            if not listed:
+                raise SystemExit(
+                    f"{source_zip} has neither images nor train.txt — re-export "
+                    f"from CVAT with 'Save images' enabled")
+            for stem, name in listed.items():
+                images_by_stem[stem] = Path(name)
+            print(f"  export carries no images; took {len(images_by_stem)} frame "
+                  f"name(s) from the split lists (pixels resolved under frames/)")
 
         # Read obj.names (used for label validation + provenance).
         classes = read_obj_names(tmp_extract)
