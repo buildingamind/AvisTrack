@@ -28,6 +28,33 @@ def normalize_uuid(uuid: str) -> str:
     return uuid.strip().upper()
 
 
+def _ntfs_serial_key(uuid: str) -> Optional[str]:
+    """Low 32 bits of an NTFS volume serial, as 8 hex chars, or None.
+
+    An NTFS volume carries a 64-bit serial. Windows reports only its low 32
+    bits, hyphenated (``A0D1-2943``); Linux ``blkid``/``lsblk`` report all 64
+    (``FEA0D169A0D12943``). They are the SAME volume, so a `sources.yaml`
+    registered on Windows can never be resolved on Linux by string equality --
+    which is exactly what happened to chamber 105B on the woodlab box.
+
+    Both forms reduce to the same 8 hex chars, so compare on that. Only NTFS
+    behaves this way; real UUIDs (ext4's 36-char form, exFAT's own 4-4) do not
+    match this shape and fall through to plain equality.
+    """
+    s = normalize_uuid(uuid).replace("-", "")
+    if not re.fullmatch(r"[0-9A-F]{8}|[0-9A-F]{16}", s):
+        return None
+    return s[-8:]
+
+
+def uuid_matches(registered: str, observed: str) -> bool:
+    """True when two UUID spellings denote the same volume."""
+    if normalize_uuid(registered) == normalize_uuid(observed):
+        return True
+    a, b = _ntfs_serial_key(registered), _ntfs_serial_key(observed)
+    return a is not None and a == b
+
+
 def probe_drive_mount(drive_uuid: str) -> Optional[Path]:
     """
     Return the current mount point of the volume with the given UUID, or
@@ -121,7 +148,7 @@ def _list_windows() -> list[dict]:
 
 def _probe_windows(target_uuid: str) -> Optional[Path]:
     for vol in _list_windows():
-        if normalize_uuid(vol["uuid"]) == target_uuid:
+        if uuid_matches(target_uuid, vol["uuid"]):
             return Path(vol["mount"])
     return None
 
@@ -154,12 +181,12 @@ def _probe_linux(target_uuid: str) -> Optional[Path]:
     by_uuid = Path("/dev/disk/by-uuid")
     if by_uuid.exists():
         for entry in by_uuid.iterdir():
-            if normalize_uuid(entry.name) == target_uuid:
+            if uuid_matches(target_uuid, entry.name):
                 # Got the device node; find its mountpoint via lsblk.
                 break
 
     for vol in _list_linux():
-        if normalize_uuid(vol["uuid"]) == target_uuid:
+        if uuid_matches(target_uuid, vol["uuid"]):
             return Path(vol["mount"])
     return None
 
@@ -190,6 +217,6 @@ def _list_macos() -> list[dict]:
 
 def _probe_macos(target_uuid: str) -> Optional[Path]:
     for vol in _list_macos():
-        if normalize_uuid(vol["uuid"]) == target_uuid:
+        if uuid_matches(target_uuid, vol["uuid"]):
             return Path(vol["mount"])
     return None

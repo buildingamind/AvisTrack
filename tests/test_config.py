@@ -230,3 +230,39 @@ def test_format_windows_serial():
     assert drive_probe._format_windows_serial("ABCD1234") == "ABCD-1234"
     assert drive_probe._format_windows_serial("abcd1234") == "ABCD-1234"
     assert drive_probe._format_windows_serial("ALREADY-DASHED") == "ALREADY-DASHED"
+
+
+class TestNtfsSerialCrossPlatform:
+    """A chamber registered on Windows must resolve on Linux.
+
+    NTFS carries a 64-bit volume serial. Windows reports only its low 32 bits,
+    hyphenated (`A0D1-2943`); Linux blkid/lsblk report all 64
+    (`FEA0D169A0D12943`). Chamber 105B's sources.yaml was written on Windows and
+    could not be resolved on the woodlab Linux box because the comparison was
+    plain string equality.
+    """
+
+    def test_windows_short_form_matches_linux_long_form(self):
+        from avistrack.config.drive_probe import uuid_matches
+        assert uuid_matches("A0D1-2943", "FEA0D169A0D12943")
+        assert uuid_matches("FEA0D169A0D12943", "A0D1-2943")
+        # the other two VR chambers use the same spelling
+        assert uuid_matches("FAD0-443D", "1234FAD0443D".rjust(16, "0"))
+
+    def test_plain_equality_still_works(self):
+        from avistrack.config.drive_probe import uuid_matches
+        assert uuid_matches(" a0d1-2943 ", "A0D1-2943")
+        assert uuid_matches("0CBA-86FF", "0cba-86ff")
+
+    def test_different_volumes_do_not_match(self):
+        from avistrack.config.drive_probe import uuid_matches
+        assert not uuid_matches("A0D1-2943", "FAD0-443D")
+        assert not uuid_matches("A0D1-2943", "FEA0D169FAD0443D")
+
+    def test_real_uuids_are_not_truncated(self):
+        """ext4-style UUIDs must not be reduced to their last 8 chars."""
+        from avistrack.config.drive_probe import uuid_matches
+        a = "3f2b1c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
+        b = "aaaaaaaa-bbbb-cccc-dddd-eeee1e2f3a4b5c6d"[:36]
+        assert not uuid_matches(a, b)
+        assert uuid_matches(a, a.upper())
