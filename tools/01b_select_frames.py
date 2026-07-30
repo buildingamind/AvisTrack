@@ -53,6 +53,15 @@ from pathlib import Path
 
 import pandas as pd
 
+# A Windows console defaults to cp1252, which cannot encode the box-drawing
+# and arrow characters these tools print. Without this the tool dies on the
+# *summary*, after the real work has already been committed to disk.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

@@ -57,6 +57,15 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# A Windows console defaults to cp1252, which cannot encode the "→" in the
+# summary. That killed the run *after* the batch had already been written,
+# leaving a correct import that looked like a crash.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
