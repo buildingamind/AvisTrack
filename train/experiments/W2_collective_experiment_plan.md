@@ -7,7 +7,7 @@
 ## Objective
 
 Train and select the best YOLO detection model for the **Wave 2 Collective Chamber** experiment.
-- **Subject**: 9 White Leghorn chicks (lighter coloration than W3 Rhode Island Red mix)
+- **Subject**: 9 Barred Plymouth Rock chicks (W3: Rhode Island Red)
 - **Camera**: Fixed overhead, 640×640 after ROI perspective correction
 - **Task**: Single-class detection (`chick`, class 0) for downstream multi-animal tracking
 
@@ -25,7 +25,7 @@ Train and select the best YOLO detection model for the **Wave 2 Collective Chamb
 | Local GPU | RTX 3070 (8 GB VRAM) — Phase 1 architecture scan and iteration |
 | Remote GPU | 8× A10 — Phase 2/3 full-length runs |
 | n_subjects | 9 (both W2 and W3) |
-| Breed difference | W2 = White Leghorn (white/pale), W3 = different breed (darker) — color domain gap |
+| Breed difference | W2 = Barred Plymouth Rock, W3 = Rhode Island Red — cross-wave domain gap (breed + arena layout) |
 
 ---
 
@@ -138,7 +138,7 @@ frame, id, x, y, w, h, conf, class, vis
 
 Keep frame when `min IoU across shared tracks vs last kept frame < iou_threshold`.
 - IoU = 1.0 → box identical (skip); IoU = 0.0 → no overlap (definitely keep)
-- W2 uses **0.96** (higher threshold → more frames from the white Leghorn breed)
+- W2 uses **0.96** (higher threshold → keeps more frames from freeze-heavy W2 clips)
 - W3 uses **0.92** (standard threshold)
 - W2 has many static "danger" clips (chicks freeze); those contribute 1 frame each
 
@@ -279,8 +279,8 @@ Ranking unchanged from Phase 1 → **yolo11s confirmed for Phase 2**.
 | `w3_finetune_full` | W3 best.pt | W2_only | 0.515 | 0.881 | — |
 | `w3_finetune_freeze` | W3 best.pt | W2_only | 0.488 | 0.844 | — |
 
-**Key finding**: W3 transfer learning hurt performance in all variants. Root cause: W2 = White
-Leghorn (white/pale); W3 = different breed (darker) — colour domain gap is too large. W2-only
+**Key finding**: W3 transfer learning hurt performance in all variants. Likely cause: cross-wave
+domain gap — W2 = Barred Plymouth Rock, W3 = Rhode Island Red, plus different arena layout. W2-only
 scratch training consistently outperforms any W3-initialised approach.
 
 **Phase 2 hit a ceiling at mAP50-95 ≈ 0.55.** Root cause: insufficient training data diversity

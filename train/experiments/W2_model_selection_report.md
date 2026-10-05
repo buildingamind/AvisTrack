@@ -4,7 +4,7 @@
 
 This report summarizes the process of selecting the best YOLO detection model for
 the Wave 2 Collective Chamber experiment. The task is single-class chick detection
-(9 White Leghorn chicks per session) from a fixed overhead 640×640 camera, used as
+(9 Barred Plymouth Rock chicks per session) from a fixed overhead 640×640 camera, used as
 input to a downstream multi-animal tracker.
 
 ---
@@ -78,9 +78,12 @@ Ranking unchanged. **`yolo11s` confirmed as the architecture** going forward.
 | `w3_finetune_full` | W3 best.pt | W2 only | 0.515 | 0.881 | — |
 | `w3_finetune_freeze` | W3 best.pt | W2 only | 0.488 | 0.844 | — |
 
-**Finding:** every W3-initialized variant underperformed. Root cause: W2 birds are
-White Leghorn (white/pale); W3 birds are darker. The colour domain gap is large enough
-that W3 pretraining actively hurts W2 performance. W2-only scratch training is the
+**Finding:** every W3-initialized variant underperformed. Likely cause: a domain gap
+between waves — W2 birds are Barred Plymouth Rock (dark, barred plumage), W3 birds are
+Rhode Island Red, and the two waves also differ in arena layout (W2: 1 feeder for
+Days 1–10; W3: 8 feeders) and recording conditions. (An earlier version of this report
+wrongly described W2 as white Leghorn chicks; corrected 2026-10-05.) W3 pretraining
+actively hurts W2 performance. W2-only scratch training is the
 clear winner.
 
 **Ceiling observed:** mAP50-95 ≈ 0.55, attributed to low data diversity — many
@@ -174,7 +177,7 @@ Phase 1.5 — Verify ranking on combined data
               → ranking unchanged; yolo11s confirmed
 
 Phase 2  — Training strategy (5 variants)
-              → W2 scratch wins; W3 transfer hurts (colour domain gap)
+              → W2 scratch wins; W3 transfer hurts (cross-wave domain gap)
               → ceiling: mAP50-95 ≈ 0.55 (data diversity limited)
 
 Data expansion — 50 clips → 72 clips; IoU 0.96 → 0.94
@@ -194,7 +197,7 @@ Final    — yolo11s + aug_minimal  (P=0.961, R=0.900, F1=0.930)
 ## Phase 4 — Tracking Evaluation Results
 
 The selected W2 detector feeds four tracking algorithms evaluated on 20 held-out
-test clips (`test_golden`, 9 White Leghorn chicks per clip).
+test clips (`test_golden`, 9 Barred Plymouth Rock chicks per clip).
 
 Primary metric: **HOTA** (balances detection and association accuracy equally).
 
@@ -252,7 +255,7 @@ All 26 raw W2 videos processed with `top9_interp` tracker.
 
 ## W3 Model — Final Validation Results (Reference)
 
-The W3 experiment uses a separate detector trained on W3 data (darker birds,
+The W3 experiment uses a separate detector trained on W3 data (Rhode Island Red birds,
 different arena). Included here as a reference benchmark.
 
 | Metric | W2 Model (`aug_minimal`) | W3 Model (selected) |
